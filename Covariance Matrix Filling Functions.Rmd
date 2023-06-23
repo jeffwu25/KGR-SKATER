@@ -1,0 +1,150 @@
+---
+title: "Peters Matrix Completion Functions"
+author: "Jeffrey Wu"
+date: "2023-06-20"
+output: pdf_document
+---
+
+Generate a random 20x20 covariance matrix: 
+
+```{r}
+n = 20
+A = matrix(runif(n^2)*2-1, ncol=n)  
+Cov20 = t(A) %*% A
+Cov20 = Cov20 + (diag(20)*0.01)
+```
+
+
+Functions implementing Gareth's method 
+
+```{r}
+#Splits matrix into 9 blocks (if not multiple of 3, last block will be largest)
+blocksplit = function(covmatrix){
+  rows = nrow(covmatrix)
+  x = floor(rows/3)
+  y = rows %% x
+  
+  #Split matrix into 9 block matrices 
+  subblock1 = covmatrix[1:x , 1:x]
+  subblock2 = covmatrix[1:x , (x+1):(2*x)]
+  subblock3 = covmatrix[1:x , ((2*x)+1):((3*x)+y)]
+  
+  subblock4 = covmatrix[(x+1):(2*x) , 1:x]
+  subblock5 = covmatrix[(x+1):(2*x) , (x+1):(2*x)]
+  subblock6 = covmatrix[(x+1):(2*x) , ((2*x)+1):((3*x)+y)]
+  
+  subblock7 = covmatrix[((2*x)+1):((3*x)+y) , 1:x]
+  subblock8 = covmatrix[((2*x)+1):((3*x)+y) , (x+1):(2*x)]
+  subblock9 = covmatrix[((2*x)+1):((3*x)+y) , ((2*x)+1):((3*x)+y)]
+  
+  blocks = list(subblock1,subblock2,subblock3,subblock4,subblock5,subblock6,subblock7,subblock8,subblock9)
+  return(blocks)
+  
+  #covmatrix2 = covmatrix
+}
+
+#Test that it works 
+# covmatrix = matrix(1:144,12,12)
+blocks20 = blocksplit(Cov20)
+blocks20[[6]]
+```
+
+
+```{r}
+#change block 6 and 8 to maximize det (ONE BLOCK ONE ITERATION)
+Eblock = function(blocklist){
+  subblock6 = t(blocklist[[2]]) %*% solve(blocklist[[1]]) %*% blocklist[[3]]
+  subblock8 = t(subblock6)
+  
+  row1 = cbind(blocklist[[1]],blocklist[[2]],blocklist[[3]])
+  row2 = cbind(blocklist[[4]],blocklist[[5]],subblock6)
+  row3 = cbind(blocklist[[7]],subblock8,blocklist[[9]])
+  
+  Covnew = rbind(row1,row2,row3)
+  Precnew = solve(Covnew)
+  newmatrices = list(Covnew,Precnew)
+  return(newmatrices)
+}
+
+#Test
+ex20 = Eblock(blocks20)
+View(ex20[[2]])
+det(ex20[[2]])
+isSymmetric(ex20[[2]])
+
+#Heatmap of prec matrix ex20
+library(reshape2)
+melted_cormat <- melt(ex20[[2]])
+head(melted_cormat)
+
+library(ggplot2)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+
+#Can we generate data w new cov matrix? 
+library(MASS) 
+mu = runif(20,0,10)
+df = data.frame(mvrnorm(100,mu,ex20[[1]]))
+```
+
+
+```{r}
+#Induce sparsity in subblock 3 and 6 (7 and 8) (0s in precision matrix)
+CEblock = function(blocklist,iter=10){
+  #Iteration 1 to initialize
+  #change block 6 and 8 to maximize det
+  subblock6 = t(blocklist[[2]]) %*% solve(blocklist[[1]]) %*% blocklist[[3]]
+  subblock8 = t(subblock6)
+  
+  #update block 3 and 7 next
+  subblock3 = blocklist[[2]] %*% solve(blocklist[[5]]) %*% subblock6
+  subblock7 = t(subblock3)
+  
+  #Rest of iterations till convergence
+  for(i in 2:iter){
+    #change block 6 and 8 to maximize det
+    subblock6 = t(blocklist[[2]]) %*% solve(blocklist[[1]]) %*% subblock3
+    subblock8 = t(subblock6)
+    
+    # row1 = cbind(blocklist[[1]],blocklist[[2]],blocklist[[3]])
+    # row2 = cbind(blocklist[[4]],blocklist[[5]],subblock6)
+    # row3 = cbind(blocklist[[7]],subblock8,blocklist[[9]])
+    # 
+    # Covnew = rbind(row1,row2,row3)
+    # blocklist2 = blocksplit(Covnew)
+    
+    #update block 3 and 7 next
+    subblock3 = blocklist[[2]] %*% solve(blocklist[[5]]) %*% subblock6
+    subblock7 = t(subblock3)
+    
+    row1 = cbind(blocklist[[1]],blocklist[[2]],subblock3)
+    row2 = cbind(blocklist[[4]],blocklist[[5]],subblock6)
+    row3 = cbind(subblock7,subblock8,blocklist[[9]])
+  }
+  
+  Covnew = rbind(row1,row2,row3)
+  Precnew = solve(Covnew)
+  newmatrices = list(Covnew,Precnew)
+  return(newmatrices)
+}
+
+#Test
+ex20 = CEblock(blocks20)
+View(ex20[[2]])
+det(ex20[[2]])
+isSymmetric(ex20[[2]])
+
+#Heatmap of prec matrix ex20
+library(reshape2)
+melted_cormat <- melt(ex20[[2]])
+head(melted_cormat)
+
+library(ggplot2)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+
+#Can we generate data w new cov matrix? 
+library(MASS) 
+mu = runif(20,0,10)
+df = data.frame(mvrnorm(100,mu,ex20[[1]]))
+```
