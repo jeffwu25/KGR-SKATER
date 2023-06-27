@@ -35,7 +35,7 @@ My  initial attempt at inducing sparseness into the precision matrix before I cr
 
 6. SKATER validation.Rmd
 
-WORK IN PROGRESS 
+Confirms that the SKATER algorithm is correctly grouping units together based on associations between units represented in the data's covariance matrix. This is done by artifically inducing sparseness to a full covariance matrix (calculated from our toy data) and then simulating new data with that covariance matrix from the multivariate normal distribution so that we have a new toy dataset. One would think that performing a SKATER clustering on this new data (which was generated with a covariance matrix that has a clustered pattern) should be able to correctly separate the units into clusters that agree with the pattern of sparseness we choose to induce. This is a work in progress...
 
 
 
