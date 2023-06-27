@@ -23,14 +23,19 @@ Conducts some basic exploratory data analysis on the subindices (11 of them) tha
 
 3. HUGE model selection.Rmd
 
-Experimenting with different aspects of the HUGE (high-dimensional undirected graph estimation) package in R. There are several options for the method of estimating  the graph and also for selecting the optimal graph based on different criterion. Sine our toy data only comprised of a time series of length 10, we decided to perform two different resampling techniques (standard bootstrap and Gaussian process interpolation) on the data so that there were more replications/observations for HUGE to learn the graph on. Then, we decided to perform a hypothesis test proposed by Cai et al. (2012) called, "Two-Sample Covariance Matrix Testing and Support Recovery in High-Dimensional and Sparse Settings", designed to test the equality of two covariance matrices to see how consistent the estimated grpah was across different bootstrap methods, estimation methods, and model selction crtierion. 
+Experiments with different aspects of the HUGE (high-dimensional undirected graph estimation) package in R. There are several options for the method of estimating  the graph and also for selecting the optimal graph based on different criterion. Sine our toy data only comprised of a time series of length 10, we decided to perform two different resampling techniques (standard bootstrap and Gaussian process interpolation) on the data so that there were more replications/observations for HUGE to learn the graph on. Then, we decided to perform a hypothesis test proposed by Cai et al. (2012) called, "Two-Sample Covariance Matrix Testing and Support Recovery in High-Dimensional and Sparse Settings", designed to test the equality of two covariance matrices to see how consistent the estimated grpah was across different bootstrap methods, estimation methods, and model selction crtierion. 
 
 4. Ideal Cluster Number.Rmd
 
+Explores how many clusters might be optimal for SKATER to cluster the counties of Califoria into. The two R functions we used for evaluating the ideal number of clusters were: fviz_nbclust() and silhouette(). These functions perform the same procedure of calculating the average width for different number of clusters but in slightly different ways. We used these two functions to compare clustering results across different subsets of SoA subindices in a stepwise manner to get an idea of how many clusters we want SKATER to create later on. 
+
 5. Inducing Sparseness Exercise.Rmd
+
+My  initial attempt at inducing sparseness into the precision matrix before I created the Covariance Matrix Filling Functions.Rmd file. This approach is not correct in comparison to the one presented in the paper by Georgescu et al. because it does not take into account the condition of positive definiteness for the covariance matrix. 
 
 6. SKATER validation.Rmd
 
-7. SKATER validation2.Rmd
+WORK IN PROGRESS 
+
 
 
