@@ -45,7 +45,9 @@ Explores how many clusters might be optimal for SKATER to cluster the counties o
 
 Creates various plots (mainly heatmaps) that will be used in presentations, papers, etc. 
 
-8. Main Mortality Analysis.Rmd
+8. Mortality Analysis.Rmd
+
+Downloads RespiratoryMortality1423.xlsx dataset and explores the patterns in respiratory related mortality across age groups, counties, and years. Primarily, we want to see the frequency of 0 or "< 11" values in the total death columns because this affects whether we use a standard Poisson or zero-inflated Poisson model for our response AND whether we should apply a truncation to that distribution because "< 11" is not easy to work with. We ended up deciding to impute all of the "< 11" values in order to avoid using a truncated distribution. This imputation was carried out in a separate file (see Mortality EM Algorithm AND ... files) 
 
 9. Mortality EM Algorithm.Rmd
 
