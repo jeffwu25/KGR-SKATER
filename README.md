@@ -1,25 +1,17 @@
 # stgci
-Code for implementing spatially clustered kernel graph regression with INLAfor high dimensional data (with causal inference extensions)
+Code for implementing spatially clustered kernel graph regression with INLA for high dimensional data (with causal inference extensions)
 
-The main research question being addressed here is: what is the effect of wildfires on respiratory related comorbidities each day following significant wildfires in California? 
+The main research question being addressed here is: What is the effect of wildfires on respiratory related comorbidities each day following significant wildfires in California? 
 
-The general flow of our approach to answer this question is as follows: 
+To answer this question, we will be applying a novel spatiotemporal modeling framework that incorporates complex dependence structures into a model separately in a parsimonious and interpretable fashion. First, we will define a partially observed graph with nodes representing each zipcode of California and learn its structure. Then, we will use that learned structure to estimate the underlying signal of the graph. Finally, we will use that signal to estimate values for unobserved nodes of the graph i.e. predicting counterfactual values that we were not able to observe. 
 
-Project 1: 
+Project 1: In the first project, we simply wanted to establish a procedure for building a model and making predictions at each county in California that is easy to implement and computationally efficient. While we tried to request the data needed for project 2 from the HCAI, we chose to use a dataset on respiratory related mortality from 2014-2019 from Cal-ViData as our response variable for project 1. 
 
-
-
-Project 2: 
-
-I plan on using real hospitalization data from the HCAI to estimate counterfactual outcomes i.e. how many hospitalizations would have been observed if no wildfire had occurred in a given area, based on the observed data from other areas. I intend to track the subsequent number of hospitalizations following several big wildfires over the course of the 2010s in California. In order to impute missing counterfactual outcomes (what hospitalization counts would have been observed had no wildfire smoke had been present in a given zipcode), we will be applying a novel spatiotemporal modeling framework. We will define a partially observed graph with nodes representing each zipcode of California. First, we will learn the structure of the graph. Then we will use that learnt structure to estimate the underlying signal of the graph. Finally, we will use that signal to estimate values for unobserved nodes of the graph i.e. predicting counterfactual values that we were not able to observe. 
+Project 2: In the second project, we wanted to apply our procedure in a causal inference setting. The predictions that our model makes, based on the observed data from regions that did not experience a wildfire, will be for "missing" counterfactual outcomes (respiratory related hospitalizations from the HCAI) i.e. outcomes if no wildfire had occurred in a given area. This way, we will be able to make a comparison in order to ascertain the causal effect of wildfires on respiratory related comorbidities. 
 
 --------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-EDIT BELOW
-
-Each of the code files in this repository represents a step in the overall construction of our graph regression model. The file that contains the full analysis AKA the main file of interest is SoA County Data Analysis.Rmd. It is good to run this file first before experimenting with any of the secondary files as there may be some dependencies. 
-
-Currently, we only working on our analysis method via toy data. That is, county data from the SoA year to year; the hospitalizations are synthetically generated from a LGCP. Our goal is to eventually examine daily respiratory related hospitalizations following significant wildfires between 2010-2019 at the zipcode level across California.
+The file to start with is SoA County Data Analysis.Rmd. It is good to run this file first before experimenting with any of the secondary files as there may be some dependencies as it contains the first steps of the analysis. THE FILES IN THE SUPPLEMENTARY FOLDER ARE NOT NECESSARY TO RUN IN ORDER TO EXECUTE OUR MODELING PROCEDURE??? 
 
 1. Covariance Matrix Filling Functions.Rmd
 
@@ -47,7 +39,7 @@ Creates various plots (mainly heatmaps) that will be used in presentations, pape
 
 8. Mortality Analysis.Rmd
 
-Downloads "RespiratoryMortality1423.xlsx" dataset and explores the patterns in respiratory related mortality across age groups, counties, and years. Primarily, we want to see the frequency of 0 or "< 11" values in the total death columns because this affects whether we use a standard Poisson or zero-inflated Poisson model for our response AND whether we should apply a truncation to that distribution because "< 11" is not easy to work with. We ended up deciding to impute all of the "< 11" values in order to avoid using a truncated distribution. This imputation was carried out in a separate file (see Mortality EM Algorithm AND ... files) 
+Downloads "RespiratoryMortality1423.xlsx" dataset and explores the patterns in respiratory related mortality across age groups, counties, and years across California. Primarily, we want to see the frequency of 0 or "< 11" values in the total death columns because this affects whether we use a standard Poisson or zero-inflated Poisson model for our response and whether we should apply a truncation to that distribution because "< 11" is not easy to work with. We ended up deciding to impute all of the "< 11" values in order to avoid using a truncated distribution. This imputation was carried out in a separate file (see Mortality EM Algorithm AND ... files) 
 
 9. Mortality EM Algorithm.Rmd
 
@@ -59,7 +51,7 @@ Implements a likelihood ratio test (basically a hypothesis test) to see whether 
 
 13. SKATER validation.Rmd
 
-Confirms that the SKATER algorithm is correctly grouping units together based on associations between units represented in the data's covariance matrix. This is done by artificially inducing sparseness to a full covariance matrix (calculated from our toy data) and then simulating new data with that covariance matrix from the multivariate normal distribution so that we have a new toy dataset. One would think that performing a SKATER clustering on this new data (which was generated with a covariance matrix that has a clustered pattern) should be able to correctly separate the units into clusters that agree with the pattern of sparseness we choose to induce. This is a work in progress...
+Confirms that the SKATER algorithm is correctly grouping units together based on associations between units represented in the data's covariance matrix. This is done by artificially inducing sparseness to a full covariance matrix (calculated from our toy data) and then simulating new data with that covariance matrix from the multivariate normal distribution so that we have a new toy dataset. One would think that performing a SKATER clustering on this new data (which was generated with a covariance matrix that has a clustered pattern) should be able to correctly separate the units into clusters that agree with the pattern of sparseness we choose to induce.
 
 12. SoA County Data Analysis
 
