@@ -43,7 +43,7 @@ Downloads "RespiratoryMortality1423.xlsx" dataset and explores the patterns in r
 
 9. Mortality EM Algorithm.Rmd (MAIN) 
 
-Imputes "< 11" values from the "RespiratoryMortality1423.xlsx" dataset via the EM algorithm (both a standard Poisson and zero-inflated Poisson version). This algorithm ensures that the maximum likelihood estimate for lambda is used to predict the missing value. 
+Imputes "< 11" values from the "respmortality1423.csv" dataset via the EM algorithm (both a standard Poisson and zero-inflated Poisson version). This algorithm ensures that the maximum likelihood estimate for lambda is used to predict the missing value. 
 
 11. Poisson-LRT.Rmd (SUPPLEMENTARY) 
 
