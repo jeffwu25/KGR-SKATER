@@ -1,0 +1,2352 @@
+---
+title: "INLA Mortality 8.1"
+author: "Jeffrey Wu"
+date: "2023-11-6"
+output:
+  html_document:
+    df_print: paged
+---
+
+Note: 8.1 means 8 clusters, method 1 (default)
+
+### Steps of my analysis
+
+Load all relevant packages:
+
+```{r,warning=FALSE,echo=FALSE,collapse=TRUE}
+library(dplyr) 
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(zoo)
+library(ggplot2)
+library(urbnmapr)
+library(devtools)
+library(readxl)
+library(spdep)
+library(sp)
+library(huge)
+library(INLA)
+library(HMMpa)
+library(invgamma)
+library(brinla)
+library(reshape2)
+library(patchwork)
+library(jsonlite)
+library(geosphere)
+library(urbnmapr)
+library(RAQSAPI)
+library(con2aqi)
+library(pscl)
+
+load("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/Workspace9.11.RData")
+```
+
+Loading and (quickly cleaning) all necessary datasets:
+
+```{r,message=FALSE,cache=TRUE,collapse=TRUE}
+###SoA data
+
+soa.data = read_xlsx("SoA.data.1019.xlsx")
+
+###county_flips are unique identifier for counties
+soa.data$county_fips = as.character(soa.data$county_fips) ##change it to character
+
+#IMPORTANT
+
+# This shape file contains the coordinates for county boundaries
+##counties is from urbanmap
+
+CA.counties = urbnmapr::counties %>% filter(state_abbv == "CA")
+
+###IF WE WANT TO BOIL DOWN TIME SERIES AND KEEP ALL DATA, SWITCH to CA_newdata below
+soa_joint <- left_join(CA.counties, soa.data, by = "county_fips")
+
+#Use with soa.data (full data)
+CA_data = soa_joint %>% select(long, lat, county_name.y, Year, Score, Total_Pop,
+                               EDUC_Lessthan9, EDUC_college, White_Collar,
+                               Unemployment_Rate, Adj_HH_income, Income_Disparity,
+                               Individuals_Below_Poverty, Median_Home_Value,
+                               Median_Gross_Rent, Housing_No_Telephone,
+                               Housing_Incomplete_Plumbing)
+
+### Quick descriptions of SoA data variables
+# Score: social deprivation index (SDI) score calculated from the following 11 subindices
+# EDUC_Lessthan9: % of population older than 24 with less than 9 years of education
+# EDUC_college: % of population older than 24 with at least four years of college education
+# White_Collar: % of population older than 15 employed in a white collar occupation
+# Unemployment_Rate: unemployment rate for population older than 15
+# Adj_HH_income: median household income adjusted for local housing costs
+# Income_Disparity: an income disparity ratio
+# Individuals_Below_Poverty: % of population below the federal poverty line
+# Median_Home_Value: median home value for owned, occupied units
+# Median_Gross_Rent: median gross rent for rented units
+# Housing_No_Telephone: % of households without a telephone
+# Housing_Incomplete_Plumbing: % of households with incomplete plumbing
+
+colnames(CA_data)[3] = "County"
+
+CA_newdata = soa.data[1:58,]
+CA_newdata = CA_newdata[,-c(4,7,8)]
+
+
+###Cal-ViDa data
+mortality = read_xlsx("RespiratoryMortality1423.xlsx")
+mortality = filter(mortality,Cause_of_Death %in% c("Chronic lower respiratory diseases","Influenza and pneumonia"))
+mortality = filter(mortality,Year_of_Death < 2020) #only studying 2014-2019 to avoid COVID pandemic
+
+Population = rep(100000,nrow(mortality))
+mortality = cbind(mortality,Population)
+```
+
+# Heatmap of population by county
+
+```{r}
+#Initializing map and station locations
+ca_map <- map_data("county", region = "california")
+
+#Match population dataset with ca_map
+#2010-2019 population data for CA 
+USpops = read.csv("CA_census_pops1019.csv")
+CApops = USpops %>% filter(STNAME == "California") %>% select(CTYNAME,POPESTIMATE2015)
+CApops = CApops[-1,]
+
+CApops$CTYNAME = unique(ca_map$subregion)
+colnames(CApops) = c("subregion","pop")
+
+merged_data <- merge(ca_map, CApops, by = "subregion", all.x = TRUE)
+
+#Plot
+gg_pop <- ggplot() +
+  geom_polygon(data = merged_data, aes(x = long, y = lat, group = group, fill = pop), 
+               color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  theme_void() +
+  labs(title = "Heatmap of County Populations for 2015") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue")
+
+print(gg_pop)
+```
+
+California state with county labels for reference:
+
+![](images/CA_counties.png)
+
+## SKATER clustering
+
+The code below structures the dataframe to be fed into the spatial data frame (SPDF) object. Dimensions are 58 rows by 10 columns (each column is its own year)
+
+```{r}
+###Setting up SPDF for CA counties 
+CA_sf = st_read(getwd(),"CA_Counties_TIGER2016")
+CA_spdf = as_Spatial(CA_sf)
+
+# score_scaled = scale(CA_data$Score)
+
+c_index = unique(CA_data$County)
+y_index = unique(CA_data$Year)
+SDI_df = matrix(nrow=10,ncol=58)
+track1 = 1
+track2 = 1
+
+for (i in c_index){
+  for (j in y_index){
+    scores = CA_data %>% filter(County == i) %>% filter(Year == j) %>% select(Score) %>% unique()
+    SDI_df[track1,track2] = scores$Score
+    track1 = track1 + 1
+  }
+  track1 = 1
+  track2 = track2 + 1
+}
+
+score_scaled = scale(SDI_df) #NEED TO SCALE THE DATA BEFORE FEEDING IT INTO SKATER
+
+#covariates_scale = data.frame(apply(CA_data[,4:16],2,scale))
+covariates_scale = data.frame(t(score_scaled))
+
+CA_spdf@data = covariates_scale
+```
+
+Using the SPDF from above, we follow the steps of SKATER tutorial (https://www.dshkol.com/post/spatially-constrained-clustering-and-regionalization/) to generate three separate clustering results: (1) Unconstrained/default (2) Clusters have minimum population constraint based on the total population / \# of clusters (3) Clusters are comprised of a minimum number of counties (10 for smaller number of clusters, 5 for bigger numbers)
+
+```{r}
+#Identify neighborhood list for counties 
+CA_nb = poly2nb(CA_spdf)
+
+#summary(CA_nb)
+
+# plot(CA_spdf, main = "With queen")
+# plot(CA_nb, coords = coordinates(CA_spdf), col="blue", add = TRUE)
+
+#Calculate edge costs (dissimilarity matrix) based on Euclidean distance 
+costs <- nbcosts(CA_nb, data = covariates_scale)
+
+###Get adjacency matrix using nb2mat() (SEPARATE STEP FOR BYM model in INLA)
+adj = nb2mat(CA_nb,style = "B")
+
+#Style means the coding scheme style used to create the weighting matrix 
+# B: basic binary coding scheme
+# W: row standardized coding scheme 
+# C: globally standardized coding scheme  
+# U: values of C / number of neighbors 
+# S: variance stabilizing coding scheme 
+
+#Transform edge costs to spatial weights 
+ct_w <- nb2listw(CA_nb,costs,style="B")   
+
+#Create minimum spanning tree 
+ct_mst <- mstree(ct_w)
+
+plot(ct_mst,coordinates(CA_spdf),col="blue", cex.lab=0.5)
+plot(CA_spdf, add=TRUE)
+
+#Run SKATER algorithm to get 8 contiguous clusters (cluster idx is in order of CA_sf)
+clus8 <- skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 7)
+
+#Add a min population constraint
+
+#Determine an appropriate minimum population threshold based on???
+pops_summary = summary(unique(CA_data$Total_Pop))
+pops_summary
+
+#Idea 1: Use median * (how many counties should be in a cluster at minimum)
+min_pop = as.numeric(pops_summary[3] * 5)
+
+#Idea 2: If we assume CA population is 39M, divide total pop by # clusters
+min_pop2 = 39000000 / 8
+
+clus8_min <- skater(edges = ct_mst[,1:2], 
+                     data = covariates_scale, 
+                     crit = min_pop2, 
+                     vec.crit = CA_data$Total_Pop,
+                     ncuts = 7)
+
+#Add a minimum number of areas in each cluster constraint 
+clus8_minarea = skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 7, 5)
+
+
+CA_data_cluster = (CA_sf %>% mutate(clus = clus8$groups))
+
+#Plot clustered CA
+plot((CA_sf %>% mutate(clus = clus8$groups))['clus'], main = "8 cluster example")
+
+plot((CA_sf %>% mutate(clus = clus8_min$groups))['clus'], main = "8 cluster example with population constraint")
+
+plot((CA_sf %>% mutate(clus = clus8_minarea$groups))['clus'], main = "8 cluster example with minimum number of areas constraint")
+
+
+#plot(CA_sf,col=c("red","green","blue","purple","yellow")[clus8_min$groups],max.plot=17)
+```
+
+For reference, here are the cluster labels for each county: 
+
+```{r}
+clusterlabels = data.frame(CA_data_cluster$NAME,clus8$groups)
+names(clusterlabels) = c("counties","Cluster")
+
+o = order(clusterlabels$counties)
+clusterlabels = clusterlabels[o,]
+rownames(clusterlabels) = NULL
+
+clusterlabels
+```
+
+
+## HUGE graph estimation
+
+This code chunk takes the cluster grouping from SKATER and aggregates the full dataframe from the SPDF (58x10) into a 10x8 matrix (10 time points x 8 clusters) to be fed into the graph estimation package HUGE. The data from each county in a given cluster is aggregated based on a population weighted mean.
+
+HUGE uses glasso to estimate a graph structure based on the aggregated feature data which recall, is the SDI score (socioeconomic status) from the SoA. We use a grid of lambda values under 1 in order to ensure that some edges will be present in the estimates produced by HUGE. This decision is supported by the fact that partial correlations calculated via regression appear to be statistically significant. Based on simulation results, we believe that EBIC is a suitable criterion for choosing the best estimated graph in the huge.select() step.
+
+```{r}
+#Aggregate feature vectors into one vector for each SKATER cluster
+CA_cluster = data.frame(CA_sf$NAMELSAD,clus8$groups)
+names(CA_cluster) = c("County","Cluster")
+year = 2010:2019
+
+CA_cluster = left_join(CA_cluster,CA_data,by = "County")
+
+#Get weighted avg value for Score for each cluster for each year 
+#Create new data matrix of aggregated feature vectors 
+cluster_features = matrix(NA,nrow = 10,ncol = 8)
+
+for (i in 1:8){
+  cluster = CA_cluster %>% filter(Cluster == i)
+
+  for(j in 1:10){
+    #Obtain a weighted mean based on population
+    vec = cluster %>% filter(Year == year[j]) %>% select(Score,Total_Pop) %>% unique()
+    cluster.pop = sum(vec$Total_Pop)
+    cluster.popweights = vec$Total_Pop/cluster.pop
+    cluster_features[j,i] = weighted.mean(vec$Score,cluster.popweights)
+  }
+}
+
+#Graph learning w HUGE
+out.glasso = huge(cluster_features,lambda = seq(0.95,0.05,by=-0.05),method="glasso")
+
+glasso.stars = huge.select(out.glasso,criterion = "stars",stars.thresh = 0.1)
+glasso.ric = huge.select(out.glasso,criterion = "ric")
+glasso.ebic = huge.select(out.glasso,criterion = "ebic")
+
+plot(glasso.stars)
+plot(glasso.ric)
+plot(glasso.ebic)
+
+huge.est = glasso.ebic$refit
+huge.est
+```
+
+## Transforming estimated adjacency matrix to graph filter H
+
+The code below takes the adjacency matrix estimated in the previous step and transforms it into a graph filter H. The steps are explained in Antonian et al (Gareth's paper). The cutoff transformation is used for the eigenvalues.
+
+```{r}
+A = as.matrix(huge.est)
+p = nrow(A)
+
+#obtain graph Laplacian L
+D = diag(p)
+for (i in 1:p){
+  d = sum(A[,i])
+  D[i,i] = d
+}
+
+L = D - A
+
+#eigendecomposition of L
+Ldecomp = eigen(L)
+U = as.matrix(Ldecomp$vectors)
+Lambdas = Ldecomp$values
+
+#test
+#U %*% (diag(p)*Lambdas) %*% t(U)
+
+#Function implementing cutoff tranform for eigenvalues 
+cutoff.transform = function(lambdas,q){
+  transformed = c()
+  cutoff = quantile(lambdas,q)
+  for (i in lambdas){
+    if(i <= cutoff){
+      transformed = c(transformed,1)
+    }
+    else{
+      transformed = c(transformed,0)
+    }
+  }
+  
+  return(transformed)
+}
+
+#quantile(Lambdas,2/3)
+transformed.L = cutoff.transform(Lambdas,2/3)
+eta.L = diag(p)*transformed.L
+
+#obtain graph filter
+H = U %*% eta.L %*% t(U)
+H
+```
+
+## Downloading EPA data
+
+```{r}
+library(tidyverse)
+library(plyr)
+library(dplyr)
+library(jsonlite)
+library(lubridate)
+library(ggplot2)
+library(maps)
+library(mapdata)
+library(geosphere)
+library(urbnmapr)
+library(RAQSAPI)
+library(con2aqi)
+
+aqs_credentials("jeffreywu@ucsb.edu","goldswift19")
+```
+
+# Get county and pollutant reference codes from EPA
+
+```{r,eval=FALSE}
+#Get county codes 
+counties_url = "https://aqs.epa.gov/data/api/list/countiesByState?email=jeffreywu@ucsb.edu&key=goldswift19&state=06&"
+
+countycodes = fromJSON(counties_url)
+countycodes = countycodes[[2]]
+california_counties = countycodes$code
+
+#Get parameter codes
+parameters_url = "https://aqs.epa.gov/data/api/list/parametersByClass?email=jeffreywu@ucsb.edu&key=goldswift19&pc=CRITERIA"
+
+parametercodes = fromJSON(parameters_url)
+parametercodes = parametercodes[[2]]
+
+#Do we want to keep Lead PM10 or delete
+parametercodes = parametercodes[-7,]
+
+pollutants = data.frame(parametercodes$code)
+labels = c("lead","co","so2","no2","o3","pm10","pm25")
+pollutants = cbind(pollutants,labels)
+```
+
+# Identifying a set of monitoring stations that are well distributed across CA
+
+The goal here is to query all of the EPA measurements for all 7 pollutants and AQI from 2014-2019. The first step is to query all stations in California that collect measurements for at least one of the 7 pollutants.
+
+FUNCTION THAT QUERIES STATION LOCATIONS FOR A GIVEN POLLUTANT
+
+```{r}
+query_aqs_station_data <- function(param,year){
+  start_date <- paste0(year, "0101")
+  end_date <- paste0(year, "1231")
+  
+  url <- paste0("https://aqs.epa.gov/data/api/monitors/byState?email=jeffreywu@ucsb.edu&key=goldswift19&param=", param, "&bdate=", start_date, "&edate=", end_date, "&state=06")
+  
+  myData <- fromJSON(url)
+  station_data = myData[[2]]
+  
+  return(station_data)
+}
+```
+
+FOR EACH POLLUTANT, GRAB ALL MONITORING STATIONS FOR EACH YEAR
+
+```{r,eval=FALSE}
+stations_url = "https://aqs.epa.gov/data/api/monitors/byState?email=jeffreywu@ucsb.edu&key=goldswift19&param=88101&bdate=20140101&edate=20141231&state=06"
+
+stations = fromJSON(stations_url)
+stations = stations[[2]]
+
+station_data2014_pm2.5 = stations %>% select(latitude,longitude,site_number, local_site_name,county_code,county_name)
+
+#Get monitoring station locations for each pollutant for each year (takes approx 3 min)
+all_pollutants_station_data <- list()
+for (year in 2014:2019){
+  year_data <- lapply(pollutants, query_aqs_station_data, year = year)
+  all_pollutants_station_data[[as.character(year)]] <- year_data
+}
+
+
+# 1 - Lead, 2 - Carbon monoxide (CO), 3 - Sulfure dioxide (SO2), 4 - Nitrogen dioxide (NO2)
+# 5 - Ozone (O3), 6 - Total PM10, 7 - PM2.5
+
+all_pollutants_station_2014data = all_pollutants_station_data[[1]]
+all_pollutants_station_2015data = all_pollutants_station_data[[2]]
+all_pollutants_station_2016data = all_pollutants_station_data[[3]]
+all_pollutants_station_2017data = all_pollutants_station_data[[4]]
+all_pollutants_station_2018data = all_pollutants_station_data[[5]]
+all_pollutants_station_2019data = all_pollutants_station_data[[6]]
+```
+
+# Identify subset of stations that has best spatial coverage wrt CA state
+
+Starting off with a list of all the stations measuring each parameter/pollutant, we want to identify a subset of stations that measure each pollutant for each county. This overall set of stations (subset for each county combined together) should have a good spatial coverage of the state.
+
+This is difficult because there is not a station in every county measuring each pollutant. So in order to identify a good set of stations to query data from, I first looked up the two largest cities in each county, based on population.
+
+Lat/long for 2 biggest cities (based on population) in each county
+
+```{r}
+citylats = c(37.8044,37.5485,38.7743,38.8071,38.3527,38.3488,39.7285,39.7596,
+             38.1231,38.0678,39.2143,39.1546,37.9780,38.0049,41.7558,41.7548,
+             38.9399,38.6688,36.7378,36.8252,39.7474,39.5243,40.8021,40.8665,
+             32.7920,32.6789,37.3614,37.3855,35.3733,35.7688,36.3275,36.3008,
+             38.9582,38.8080,40.4163,40.2840,34.0522,33.7701,36.9613,37.1230,
+             37.9735,38.1074,37.4849,37.4320,39.4457,39.4096,37.3022,37.0583,
+             41.4871,41.4099,37.6485,38.5149,36.6777,36.6149,38.2975,38.1749,
+             39.3280,39.2191,33.8366,33.7455,38.7521,38.7907,39.9341,40.3063,
+             33.9806,33.9425,38.5816,38.4088,36.8525,36.8125,34.1083,34.0922,
+             32.7157,32.6401,37.7749,37.9780,37.9577,37.7396,35.2828,35.6369,
+             37.6879,37.5630,34.9530,34.4208,37.3387,37.3688,36.9741,36.9102,
+             40.5865,40.4482,39.6763,39.5595,41.7354,41.3099,38.1041,38.2492,
+             38.4404,38.2324,37.6393,37.4946,39.1404,39.1165,40.1785,39.9277,
+             40.7310,40.4156,36.3301,36.2077,38.0297,37.9829,34.1975,34.1706,
+             38.5449,38.6785,39.1277,39.0954)
+
+citylongs = c(122.2712,121.9886,119.8219,119.7960,120.9327,120.7741,121.8375,121.6219,
+              120.8509,120.5385,122.0094,122.1494,122.0311,121.8058,124.2026,124.1580,
+              119.9772,120.9872,119.7871,119.7029,122.1964,122.1936,124.1637,124.0828,
+              115.5631,115.4989,118.3997,118.4105,119.0187,119.2471,119.6457,119.7829,
+              122.6264,122.5583,120.6530,120.5394,118.2437,118.1937,120.0607,120.2602,
+              122.5311,122.5697,119.9663,120.0985,123.8053,123.3556,120.4830,120.8499,
+              120.5425,120.6791,118.9721,119.4768,121.6555,121.8221,122.2869,122.2608,
+              120.1833,121.0611,117.9143,117.8677,121.2880,121.2358,120.8980,121.2319,
+              117.3755,117.2297,121.4944,121.3716,121.4016,121.3658,117.2898,117.4350,
+              117.1611,117.0842,122.4194,122.0311,121.2908,121.4260,120.6596,120.6545,
+              122.4702,122.3255,120.4357,119.6982,121.8853,122.0363,122.0308,121.7569,
+              122.3917,122.2978,120.2410,120.8277,122.6345,122.3106,122.2566,122.0405,
+              122.7141,122.6367,120.9970,120.8460,121.6169,121.6380,122.2358,122.1792,
+              122.9420,123.2100,119.2966,119.3473,119.9741,120.3822,119.1771,118.8376,
+              121.7405,121.7733,121.5508,121.5522)
+citylongs = -1*citylongs
+```
+
+Alameda: Oakland (429082) and Fremont
+
+Alpine: Alpine Village (225) and Mesa Vista
+
+Amador: Ione (8363) and Jackson
+
+Butte: Chico (94776) and Paradise
+
+Calaveras: Rancho Calaveras (5324) and Angels Camp
+
+Colusa: Colusa (5911) and Williams
+
+Contra Costa: Concord (129688) and Antioch
+
+Del Norte: Crescent City (6805) and Bertsch-Oceanview
+
+El Dorado: South Lake Tahoe (22036) and Cameron Park
+
+Fresno: Fresno (530093) and Clovis
+
+Glenn: Orland (7644) and Willows
+
+Humboldt: Eureka (26998) and Arcata
+
+Imperial: El Centro (44120) and Calexico
+
+Inyo: Bishop (3746) and Dixon Lane-Meadow Creek
+
+Kern: Bakersfield (383579) and Delano
+
+Kings: Hanford (56910) and Lemoore
+
+Lake: Clearlake (15384) and Hidden Valley Lake
+
+Lassen: Susanville (15165) and Janesville
+
+Los Angeles: Los Angeles (3990000) and Long Beach
+
+Madera: Madera (65706) and Chowchilla
+
+Marin: San Rafael (58704) and Novato
+
+Mariposa: Mariposa (1526) and Catheys Valley
+
+Mendocino: Fort Bragg (7359) and Willits
+
+Merced: Merced (83316) and Los Banos
+
+Modoc: Alturas (2509) and California Pines
+
+Mono: Mammoth Lakes (8127) and Walker
+
+Monterey: Salinas (156259) and Seaside
+
+Napa: Napa (79263) and American Canyon
+
+Nevada: Truckee (16561) and Grass Valley
+
+Orange: Anaheim (352005) and Santa Ana
+
+Placer: Roseville (139117) and Rocklin
+
+Plumas: East Quincy (2489) and Chester
+
+Riverside: Riverside (330063) and Moreno Valley
+
+Sacramento: Sacramento (508529) and Elk Grove
+
+San Benito: Hollister (39749) and Ridgemark
+
+San Bernandino: San Bernandino (215941) and Fontana
+
+San Diego: San Diego (1426000) and Chula Vista
+
+San Francisco: San Francisco (810000) and Concord
+
+San Joaquin: Stockton (311178) and Tracy
+
+San Luis Obispo: San Luis Obispo (47446) and Paso Robles
+
+San Mateo: Daly City (107008) and San Mateo
+
+Santa Barbara: Santa Maria (107408) and Santa Barbara
+
+Santa Clara: San Jose (1030000) and Sunnyvale
+
+Santa Cruz: Santa Cruz (64725) and Watsonville
+
+Shasta: Redding (91772) and Anderson
+
+Sierra: Loyalton (700) and Downieville
+
+Siskiyou: Yreka (7556) and Mount Shasta
+
+Solano: Vallejo (121913) and Fairfield
+
+Sonoma: Santa Rosa (177586) and Petaluma
+
+Stanislaus: Modesto (215030) and Turlock
+
+Sutter: Yuba City and South Yuba City
+
+Tehama: Red Bluff (14283) and Corning
+
+Trinity: Weaverville (3667) and Post Mountain
+
+Tulare: Visalia (133800) and Tulare
+
+Tuolumne: Phoenix Lake-Cedar Ridge (5108) and Sonora
+
+Ventura: Oxnard (209877) and Thousand Oaks
+
+Yolo: Davis (69289) and Woodland
+
+Yuba: Linda (17773) and Olivehurst
+
+Then, I created the function below to choose a group of stations that are within a certain distance (Haversine distance from the latitude and longitude) of each city that I identified in the previous step. If there are less than 5 stations associated to a given city, the distance threshold (which starts at 100km) is increased by 50km.
+
+FUNCTION THAT SELECTS SET OF STATIONS CLOSEST TO A GIVEN LAT/LONG
+
+```{r}
+# Function to filter stations based on spatial coverage
+subset_stations_by_spatial_coverage <- function(station_data, reference_lat, reference_lon, max_distance_km=100) {
+  # Calculate distances between stations and reference location
+  distances <- distHaversine(
+    cbind(station_data$longitude, station_data$latitude),
+    c(reference_lon, reference_lat)
+  )
+  distances <- distances/1000
+  
+  # idx =  which(distances == min(distances))
+  # #Identify station within min distance to centroid of county
+  # station_data_subset <- station_data[idx, ]
+  
+  # Subset stations within the specified max_distance_km
+  idx = which(distances <= max_distance_km)
+  station_data_subset <- station_data[idx, ]
+  station_data_subset <- cbind(station_data_subset,distances[idx])
+  
+  while (nrow(station_data_subset) < 5){
+    max_distance_km = max_distance_km + 50
+    station_data_subset = subset_stations_by_spatial_coverage(station_data, 
+                              reference_lat, reference_lon, max_distance_km)
+  }
+  
+  return(station_data_subset)
+}
+
+# # Construct the subset of stations based on spatial coverage criteria (test)
+# reference_lat = citylats[3]
+# reference_lon = citylongs[3]
+# max_distance_km = 100
+# 
+# subset_stations <- subset_stations_by_spatial_coverage(station_data2014_pm2.5, reference_lat, reference_lon, max_distance_km)
+# 
+# # Print the subset of stations
+# print(subset_stations)
+```
+
+```{r,eval=FALSE}
+# Obtain centroid lat/longs for each county 
+CA.counties2 = read.csv("counties.ca.data.csv")
+ca.coordinates = data.frame(CA.counties2$county,CA.counties2$lat,CA.counties2$lng)
+colnames(ca.coordinates) = c("county","lat","long")
+
+ca.coordinates = ca.coordinates[order(ca.coordinates$county),]
+row.names(ca.coordinates) = NULL
+```
+
+
+IMPORTANT FUNCTION: 
+
+Given a dataset containing station locations/codes for a given pollutant and year, the function below selects 5-20 stations that are closest to the lat/longs for the two biggest cities in each county and puts the station information (code, lat, long, etc) into a dataframe.
+
+```{r,eval=FALSE}
+#Function that finds best monitoring station for each county for a specific pollutant for a specific year
+# 1 - Lead, 2 - Carbon monoxide (CO), 3 - Sulfure dioxide (SO2), 4 - Nitrogen dioxide (NO2)
+# 5 - Ozone (O3), 6 - Total PM10, 7 - PM2.5
+
+best_stations = function(stationdata,pollutant){
+
+  subset_list = list()
+  
+  #Load lat/longs for 58x2 cities into dataframe
+  CA.coords = data.frame(rep(countycodes$value_represented,each = 2),citylats,citylongs)
+  colnames(CA.coords) = c("County","Lat","Long")
+  
+  #Find closest station for each county centroid using subset_stations_by_spatial_coverage function
+  for (i in 1:nrow(CA.coords)){
+  reference_lat = CA.coords$Lat[i]
+  reference_lon = CA.coords$Long[i]
+  max_distance_km = 100
+  
+  subset_stations <- subset_stations_by_spatial_coverage(stationdata[[pollutant]], reference_lat, reference_lon, max_distance_km)
+  subset_list[[i]] = subset_stations
+  }
+  
+  #Combine pairs of city lists together 
+  subset_list2 = list()
+  sequence = seq(2,116,2)
+  for(i in sequence){
+    combine = rbind(subset_list[[i]],subset_list[[i-1]])
+    subset_list2[[i-1]] = combine
+  }
+  subset_list2 =subset_list2[!sapply(subset_list2,is.null)]
+  
+  #Create a county label vector
+  repnames = c()
+  for(i in 1:58){
+    repnames = c(repnames,nrow(subset_list2[[i]]))
+  }  
+  countylabels = rep(countycodes$value_represented,times = repnames)
+  
+  #Format the list into dataframe
+  beststations = as.data.frame(do.call(rbind, subset_list2))
+  beststations = cbind(countylabels,beststations$county_name,
+                       beststations$`distances[idx]`,beststations)
+  colnames(beststations)[c(1,2,3)] = c("measuring_county","station_county","distance_apart")
+  rownames(beststations) = NULL
+  
+  return(beststations)
+}
+
+# #test cases
+# pm2.5_stations_2014 = best_stations(all_pollutants_station_2014data,7)
+# CO_stations_2016 = best_stations(all_pollutants_station_2016data,2)
+```
+
+CREATING BEST STATION LIST/DATAFRAME FOR EACH POLLUTANT, EACH ENTRY IS A YEAR
+
+```{r,eval=FALSE}
+#Generate list for best stations for each pollutant for each year
+Lead_stations = list()
+
+Lead_stations[[1]] = best_stations(all_pollutants_station_2014data,1)
+Lead_stations[[2]] = best_stations(all_pollutants_station_2015data,1)
+Lead_stations[[3]] = best_stations(all_pollutants_station_2016data,1)
+Lead_stations[[4]] = best_stations(all_pollutants_station_2017data,1)
+Lead_stations[[5]] = best_stations(all_pollutants_station_2018data,1)
+Lead_stations[[6]] = best_stations(all_pollutants_station_2019data,1)
+
+
+
+CO_stations = list()
+
+CO_stations[[1]] = best_stations(all_pollutants_station_2014data,2)
+CO_stations[[2]] = best_stations(all_pollutants_station_2015data,2)
+CO_stations[[3]] = best_stations(all_pollutants_station_2016data,2)
+CO_stations[[4]] = best_stations(all_pollutants_station_2017data,2)
+CO_stations[[5]] = best_stations(all_pollutants_station_2018data,2)
+CO_stations[[6]] = best_stations(all_pollutants_station_2019data,2)
+
+
+
+SO2_stations = list()
+
+SO2_stations[[1]] = best_stations(all_pollutants_station_2014data,3)
+SO2_stations[[2]] = best_stations(all_pollutants_station_2015data,3)
+SO2_stations[[3]] = best_stations(all_pollutants_station_2016data,3)
+SO2_stations[[4]] = best_stations(all_pollutants_station_2017data,3)
+SO2_stations[[5]] = best_stations(all_pollutants_station_2018data,3)
+SO2_stations[[6]] = best_stations(all_pollutants_station_2019data,3)
+
+
+
+NO2_stations = list()
+
+NO2_stations[[1]] = best_stations(all_pollutants_station_2014data,4)
+NO2_stations[[2]] = best_stations(all_pollutants_station_2015data,4)
+NO2_stations[[3]] = best_stations(all_pollutants_station_2016data,4)
+NO2_stations[[4]] = best_stations(all_pollutants_station_2017data,4)
+NO2_stations[[5]] = best_stations(all_pollutants_station_2018data,4)
+NO2_stations[[6]] = best_stations(all_pollutants_station_2019data,4)
+
+
+
+O3_stations = list()
+
+O3_stations[[1]] = best_stations(all_pollutants_station_2014data,5)
+O3_stations[[2]] = best_stations(all_pollutants_station_2015data,5)
+O3_stations[[3]] = best_stations(all_pollutants_station_2016data,5)
+O3_stations[[4]] = best_stations(all_pollutants_station_2017data,5)
+O3_stations[[5]] = best_stations(all_pollutants_station_2018data,5)
+O3_stations[[6]] = best_stations(all_pollutants_station_2019data,5)
+
+
+
+PM10_stations = list()
+
+PM10_stations[[1]] = best_stations(all_pollutants_station_2014data,6)
+PM10_stations[[2]] = best_stations(all_pollutants_station_2015data,6)
+PM10_stations[[3]] = best_stations(all_pollutants_station_2016data,6)
+PM10_stations[[4]] = best_stations(all_pollutants_station_2017data,6)
+PM10_stations[[5]] = best_stations(all_pollutants_station_2018data,6)
+PM10_stations[[6]] = best_stations(all_pollutants_station_2019data,6)
+
+
+
+# Lead.PM10_stations = list()
+# 
+# Lead.PM10_stations[[1]] = best_stations(all_pollutants_station_2014data,7)
+# Lead.PM10_stations[[2]] = best_stations(all_pollutants_station_2015data,7)
+# Lead.PM10_stations[[3]] = best_stations(all_pollutants_station_2016data,7)
+# Lead.PM10_stations[[4]] = best_stations(all_pollutants_station_2017data,7)
+# Lead.PM10_stations[[5]] = best_stations(all_pollutants_station_2018data,7)
+# Lead.PM10_stations[[6]] = best_stations(all_pollutants_station_2019data,7)
+
+
+
+PM2.5_stations = list()
+
+PM2.5_stations[[1]] = best_stations(all_pollutants_station_2014data,7)
+PM2.5_stations[[2]] = best_stations(all_pollutants_station_2015data,7)
+PM2.5_stations[[3]] = best_stations(all_pollutants_station_2016data,7)
+PM2.5_stations[[4]] = best_stations(all_pollutants_station_2017data,7)
+PM2.5_stations[[5]] = best_stations(all_pollutants_station_2018data,7)
+PM2.5_stations[[6]] = best_stations(all_pollutants_station_2019data,7)
+```
+
+# Heatmap of population with station locations marked (2015)
+
+Do the stations provide a good spatial coverage of California? To me, the coverage is reasonable especially because most of the northern and eastern counties are where most of the sparsely populated counties are located. There are probably not that many EPA stations there as a result. 
+
+```{r,cache-TRUE}
+pollutants1_2015 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Raw/pollutants1_2015_8.17.RData")
+pollutants2_2015 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Raw/pollutants2_2015_8.17.RData")
+
+stationlats = c(unique(pollutants1_2015$latitude),unique(pollutants2_2015$latitude))
+stationlongs = c(unique(pollutants1_2015$longitude),unique(pollutants2_2015$longitude))
+
+station_points = data.frame(stationlats,stationlongs)
+
+#Plot
+gg_pop_stations <- ggplot() +
+  geom_polygon(data = merged_data, aes(x = long, y = lat, group = group, fill = pop), 
+               color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  theme_void() +
+  labs(title = "Heatmap of County Populations with Station Locations for 2015") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue")
+
+# Add points
+gg_pop_stations <- gg_pop_stations +
+  geom_point(data = station_points, aes(x = stationlongs, y = stationlats), 
+             color = "red", size = 1.5)
+
+print(gg_pop_stations)
+```
+
+# Downloading and aggregating air quality data using direct API calls
+
+Given a set of 5-20 monitoring stations for each county, we loop through its station codes (for each year 2014-2019) and query using the EPA's AQS function. This function only allows you to query a maximum of 4 parameters at once for a single year, so two calls to the function have to be made for each year (4 and 3).
+
+(BELOW SHOWS IT BEING DONE FOR 2019)
+
+END GOAL FINAL FORM: ONE BIG DATAFRAME (ALL POLLUTANTS ALL YEARS TOGETHER, USE FILTER TO SEPARATE)
+
+```{r,eval=FALSE}
+# 1 - Lead, 2 - Carbon monoxide (CO), 3 - Sulfure dioxide (SO2), 4 - Nitrogen dioxide (NO2)
+# 5 - Ozone (O3), 6 - Total PM10, 7 - PM2.5
+
+stations2019x = rbind(Lead_stations[[6]],CO_stations[[6]],
+             SO2_stations[[6]],NO2_stations[[6]])
+stations2019y = rbind(O3_stations[[6]],PM10_stations[[6]],PM2.5_stations[[6]])
+
+sitenums2019x = stations2019x %>% select(county_code,site_number) %>% unique() #198 stations
+sitenums2019y = stations2019y %>% select(county_code,site_number) %>% unique() #178 stations
+
+
+#Trying EPA R Package query (took 15 + 20 min!) gives us a dataframe 
+ccodes = sitenums2019y$county_code
+snums = sitenums2019y$site_number
+str1 = "2019-01-01"
+str2 = "2019-12-31"
+
+pollutants1_2019 = aqs_dailysummary_by_site(parameter = c("14129","42101","42401","42602"),bdate = as.Date(str1),edate = as.Date(str2),stateFIPS = "06",countycode = ccodes,sitenum = snums)
+
+pollutants2_2019 = aqs_dailysummary_by_site(parameter = c("44201","81102","88101"),bdate = as.Date(str1),edate = as.Date(str2),stateFIPS = "06",countycode = ccodes,sitenum = snums)
+
+###SAVE LIST LOCALLY
+saveRDS(pollutants2_2019,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Raw/pollutants2_2019_8.18.RData")
+```
+
+After querying the raw data for each pollutant and each year, we want to go through it and remove any data from stations that have "bad" data. The standards that I set (for now) are that for a given year, a station should have at least 240 of the 365 days included for a year of data. Additionally, I applied a Hampel filter to identify outliers and if there are more than 14 consecutive outliers in the data i.e., days in a row with measurements that are abnormal, I considered the data from that station to not be suitable for inclusion in the final dataset.
+
+NOTE: the daily values reported in the raw dataset are actually daily averages from periodic measurements made by the station throughout the day
+
+After data from so called "bad" stations were removed, another function is applied which aggregates the daily observations into a monthly median The raw data is in the form of a single dataframe, which is fed into the important function raw_transform(). This function uses several functions to create a list of dataframes, one for each county, which represent the monthly median measurements for a certain pollutant in a given county in a given year.
+
+QUALITY CHECK FUNCTION FOR STATION DATA: WANT TO ADDRESS OUTLIERS, MISSINGNESS
+
+```{r}
+#Given a dataset like CO2016 (list of 1000ish stations), check for 2/3 missing data and for strings of outliers (14 in a row)
+
+station_quality_check = function(station_data){
+  l = length(station_data)
+  badindex = c()
+  consecutive_outliers = list()
+  
+  for (i in 1:l){
+    aqi = station_data[[i]]$aqi
+    pollutant_level = station_data[[i]]$arithmetic_mean
+    
+    #check for outliers in AQI
+    median.aqi = median(na.omit(aqi))
+    mad.aqi = mad(na.omit(aqi))
+    
+    min.aqi = median.aqi-(3*mad.aqi)
+    max.aqi = median.aqi+(3*mad.aqi)
+    
+    outliers.aqi = which(aqi < min.aqi | aqi > max.aqi)
+    
+    result.aqi = rle(diff(outliers.aqi))
+
+    
+    #check for outliers in pollutant measure
+    median.pollutant = median(na.omit(pollutant_level))
+    mad.pollutant = mad(na.omit(pollutant_level))
+    
+    min.pollutant = median.pollutant-(3*mad.pollutant)
+    max.pollutant = median.pollutant+(3*mad.pollutant)
+    
+    outliers.pollutant = which(pollutant_level < min.pollutant | pollutant_level > max.pollutant)
+    
+    result.pollutants = rle(diff(outliers.pollutant))
+    
+    
+    if (nrow(station_data[[i]]) < 240){
+      badindex = c(badindex,i)
+    }
+    
+    else if (any(result.aqi$lengths >= 14 & result.aqi$values == 1) == TRUE){
+      badindex = c(badindex,i)
+    }
+    
+    else if (any(result.pollutants$lengths >= 14 & result.pollutants$values == 1) == TRUE){
+      badindex = c(badindex,i)
+    }
+    
+    consecutive_outliers[[i]] = c("AQI",outliers.aqi,"POLLUTANTS",outliers.pollutant)
+  }
+  
+  bad_list = list(badindex,consecutive_outliers)
+  
+  return(bad_list)
+}
+
+
+#Test on CO2016 and CO2017
+# station_quality_check(CO2016) #returns 61 "bad stations" out of 1230
+# 
+# removeidx = station_quality_check(SO22017)[[1]] #returns 715 out of 1056 "bad stations" 
+# 
+# test = SO22017[- removeidx]
+```
+
+FUNCTION THAT AGGREGATES DAILY DATA INTO MONTHYLY MEDIANS
+
+```{r}
+monthly_agg = function(pollutantdata){
+  #Aggregating all the station data at once
+  date = ymd(pollutantdata$date_local)
+  df2 <- pollutantdata                                   # Duplicate data
+  df2$year_month <- floor_date(date,"month")  # Create year-month column
+  df3 = df2 %>% select(county,site_number,arithmetic_mean,aqi,year_month) %>% as.data.frame()
+  
+  df3$arithmetic_mean = as.numeric(df3$arithmetic_mean)
+  df3$aqi[which(df3$aqi == "NULL")] = NA
+  df3$aqi = as.numeric(df3$aqi)
+  
+  df.agg = df3 %>% group_by(year_month) %>% dplyr::summarize(arithmetic_mean = median(na.omit(arithmetic_mean)),aqi = median(na.omit(aqi))) %>% as.data.frame()
+  
+  return(df.agg)
+}
+```
+
+IMPORTANT FUNCTION: TRANSFORMING RAW DATA TO FINAL FORM
+
+```{r}
+# Group 1: 14129 - Lead, 421012 - Carbon monoxide (CO), 42401 - Sulfure dioxide (SO2), 42602 - Nitrogen dioxide (NO2)
+# Group 2: 44201 - Ozone (O3), 81102 - Total PM10, 88101 - PM2.5
+
+raw_transform = function(rawdata,reference_list,standard){
+  
+  ###SEPARATE DF INTO A LIST OF DFs 
+  
+  matched_list = list()
+  
+  if(missing(standard)){
+    for (i in 1:nrow(reference_list)){
+    data = rawdata %>% filter(county_code == reference_list$county_code[i], site_number == reference_list$site_number[i])
+  
+    matched_list[[i]] = data
+    }
+  } else {
+      for (i in 1:nrow(reference_list)){
+      data = rawdata %>% filter(county_code == reference_list$county_code[i], site_number == reference_list$site_number[i],pollutant_standard == standard)
+
+      matched_list[[i]] = data
+    }
+  }
+  
+  names(matched_list) = reference_list$measuring_county
+  
+  ###STATION QUALITY CHECK
+  
+  removeidx = station_quality_check(matched_list)[[1]]
+  good_matched_list = matched_list[- removeidx]
+  
+  #Convert list back into one big dataframe
+  temp = as.data.frame(do.call(rbind, good_matched_list)) #TOO MANY ROWS RIGHT?
+  good_df = unique.data.frame(temp)
+  
+  
+  ###MAKE A LIST OF COMBINED STATION DATA FOR EACH COUNTY
+  mid_list = list()
+
+  for (i in unique(reference_list$measuring_county)){
+    
+    df_new = data.frame(good_df[1,])
+    subset = reference_list %>% filter(measuring_county == i) %>% select(county_code,site_number)
+  
+    for (j in 1:nrow(subset)){
+      pull = good_df %>% filter(county_code == reference_list$county_code[j], site_number == reference_list$site_number[j])
+      
+      df_new = rbind(df_new,pull)
+    }
+    
+    df_new = df_new[-1,]
+    mid_list[[i]] = df_new
+  }
+  
+  ###AGGREGATE DAILY DATA TO MONTHLY FOR EACH COUNTY
+  
+  final_list = lapply(mid_list,monthly_agg)
+  
+  return(final_list)
+}
+```
+
+When assembling final datasets, note that certain pollutant standards are used bc they have values for AQI... the ones I used were:
+
+Lead: Lead 3-Month 2009 ?? Has all NAs for AQI
+
+CO: CO 8-hour 1971
+
+SO2: SO2 1-hour 2010
+
+NO2: NO2 1-hour 2010
+
+O3: Ozone 8-hour 2015 ; sample duration should be 8 HR
+
+PM10: PM10 24-hour 2006
+
+PM2.5: PM25 24-hour 2012
+
+APPLY RAW TRANSFORM FUNCTION TO ALL POLLUTANTS FOR ALL YEARS (BELOW SHOWS IT BEING DONE FOR 2019)
+
+```{r,eval=FALSE}
+#Load raw data
+pollutants1_2019 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Raw/pollutants1_2019_8.18.RData")
+pollutants2_2019 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Raw/pollutants2_2019_8.18.RData")
+
+Lead2019 = pollutants1_2019 %>% filter(parameter_code == "14129")
+CO2019 = pollutants1_2019 %>% filter(parameter_code == "42101")
+SO22019 = pollutants1_2019 %>% filter(parameter_code == "42401")
+NO22019 = pollutants1_2019 %>% filter(parameter_code == "42602")
+O32019 = pollutants2_2019 %>% filter(parameter_code == "44201")
+PM102019 = pollutants2_2019 %>% filter(parameter_code == "81102")
+PM2.52019 = pollutants2_2019 %>% filter(parameter_code == "88101")
+
+
+Lead2019_final = raw_transform(rawdata = Lead2019,reference_list = Lead_stations[[6]],standard = "Lead 3-Month 2009")
+
+CO2019_final = raw_transform(rawdata = CO2019,reference_list = CO_stations[[6]],standard = "CO 8-hour 1971")
+
+SO22019_final = raw_transform(rawdata = SO22019,reference_list = SO2_stations[[6]],standard = "SO2 1-hour 2010")
+
+NO22019_final = raw_transform(rawdata = NO22019,reference_list = NO2_stations[[6]],standard = "NO2 1-hour 2010")
+
+O32019_final = raw_transform(rawdata = O32019,reference_list = O3_stations[[6]],standard = "Ozone 8-hour 2015")
+
+PM102019_final = raw_transform(rawdata = PM102019,reference_list = PM10_stations[[6]],standard = "PM10 24-hour 2006") 
+
+PM2.52019_final = raw_transform(rawdata = PM2.52019,reference_list = PM2.5_stations[[6]],standard = "PM25 24-hour 2012")
+```
+
+COMBINING EACH POLLUTANTS DATASET INTO A SINGLE DATAFRAME FOR THE YEAR (BELOW SHOWS IT BEING DONE FOR 2019)
+
+```{r,eval=FALSE}
+###Combine final data into one dataframe for 2014 
+test1 = as.data.frame(do.call(rbind, Lead2019_final))
+test1 = cbind(test1,rep(pollutants$parametercodes.code[1],nrow(test1))) #maybe change parameter codes to 1-7?
+colnames(test1) = c("Year-Month","Value","AQI","Pollutant")
+
+test2 = as.data.frame(do.call(rbind, CO2019_final))
+test2 = cbind(test2,rep(pollutants$parametercodes.code[2],nrow(test2))) #maybe change parameter codes to 1-7?
+colnames(test2) = c("Year-Month","Value","AQI","Pollutant")
+
+test3 = as.data.frame(do.call(rbind, SO22019_final))
+test3 = cbind(test3,rep(pollutants$parametercodes.code[3],nrow(test3))) #maybe change parameter codes to 1-7?
+colnames(test3) = c("Year-Month","Value","AQI","Pollutant")
+
+test4 = as.data.frame(do.call(rbind, NO22019_final))
+test4 = cbind(test4,rep(pollutants$parametercodes.code[4],nrow(test4))) #maybe change parameter codes to 1-7?
+colnames(test4) = c("Year-Month","Value","AQI","Pollutant")
+
+test5 = as.data.frame(do.call(rbind, O32019_final))
+test5 = cbind(test5,rep(pollutants$parametercodes.code[5],nrow(test5))) #maybe change parameter codes to 1-7?
+colnames(test5) = c("Year-Month","Value","AQI","Pollutant")
+
+test6 = as.data.frame(do.call(rbind, PM102019_final))
+test6 = cbind(test6,rep(pollutants$parametercodes.code[6],nrow(test6))) #maybe change parameter codes to 1-7?
+colnames(test6) = c("Year-Month","Value","AQI","Pollutant")
+
+test7 = as.data.frame(do.call(rbind, PM2.52019_final))
+test7 = cbind(test7,rep(pollutants$parametercodes.code[7],nrow(test7))) #maybe change parameter codes to 1-7?
+colnames(test7) = c("Year-Month","Value","AQI","Pollutant")
+
+#Combine each pollutant dataset into one big dataset for the year
+final_data19 = rbind(test1,test2,test3,test4,test5,test6,test7)
+
+###SAVE FINAL DATASET LOCALLY
+saveRDS(final_data19,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data19_9.1.RData")
+```
+
+HAVE TO CLEAN DATA BEFORE FINALIZING:
+
+Having combined the monthly medians for every county for a single year for each pollutant into a single dataframe, one final cleaning step must be performed before putting each years' data together. The AQI value that is in each row corresponds to the AQI standardized measurement for that specific pollutant. Each pollutant has a different standardizing equation, but once they are all standardized as they are in the dataset and they can be compared against each other. The reported AQI measurement for a given day is just the maximum of the AQI values corresponding to each of the 7 pollutants. So the maximum AQI value (among 6 values bc Lead observations never have AQI values) was found for each month and that value was set as the actual AQI value for that month in all corresponding rows.
+
+FIND MAX AQI (AMONG THE 7 POLLUTANTS) FOR EACH MONTH -\> SET AS ACTUAL AQI FOR THAT MONTH
+
+(BELOW SHOWS IT BEING DONE FOR 2019)
+
+```{r,eval=FALSE}
+#Do for each year 
+months = c("01","02","03","04","05","06","07","08","09","10","11","12")
+
+###Do for each year 
+for (i in 1:58){
+  idx1 = which(stringr::str_starts(rownames(final_data19), counties[i]))
+  subset1 = final_data19[idx1,]
+  subset1$`Year-Month`= as.Date(subset1$`Year-Month`)
+  
+  for (j in months){ 
+  #Filter by county and date
+    date = paste0("2019-",j,"-01")
+    date = as.Date(date)
+    subset2 = subset1 %>% filter(`Year-Month` == as.Date(date)) 
+    
+    trueAQI = max(na.omit(subset2$AQI))
+    
+    idx2 = which(subset1$`Year-Month` == date)
+    subset1$AQI[idx2] = trueAQI
+  }
+  
+  final_data19[idx1,] = subset1
+}
+
+###SAVE FINAL DATASET LOCALLY
+saveRDS(final_data19,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data19_9.1.RData")
+```
+
+COMBINING EACH YEARS DATASET INTO ONE BIG TIDY DATAFRAME FOR AIR QUALITY COVARIATES
+
+FILL IN YOUR OWN FILE DIRECTORIES HERE! START WORKING W ACTUAL EPA DATA FROM HERE ON
+
+```{r}
+final_data14 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data14_9.1.RData")
+final_data15 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data15_9.1.RData")
+final_data16 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data16_9.1.RData")
+final_data17 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data17_9.1.RData")
+final_data18 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data18_9.1.RData")
+final_data19 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Aggregated/final_data19_9.1.RData")
+
+final_EPA_data = rbind(final_data14,final_data15,final_data16,final_data17,
+                       final_data18,final_data19)
+saveRDS(final_EPA_data,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Final/final_EPA_data_9.1.RData")
+
+
+final_EPA_data = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Final/final_EPA_data_9.1.RData")
+head(final_EPA_data)
+```
+
+# Adding cluster labels to the EPA data and aggregating based on clusters
+
+Once the EPA data is in the correct format (one big dataframe) at the county level, we now need to aggregate it to the cluster level according to the SKATER cluster labels from before. A population weighted mean was used to aggregate here as well, MAY OR MAY NOT BE APPROPRIATE?
+
+```{r}
+Cluster = rep(1,length(final_EPA_data))
+final_EPA_agg_data = cbind(final_EPA_data,Cluster)
+
+for (i in 1:58){
+  idx = which(stringr::str_starts(rownames(final_EPA_agg_data), counties[i]))
+  final_EPA_agg_data$Cluster[idx] = clusterlabels$Cluster[i]
+}
+
+Time = c(rep(c(1:12),58),rep(13:24,58),rep(25:36,58),rep(37:48,58),rep(49:60,58),rep(61:72,58)) 
+Time = rep(Time,7)
+final_EPA_agg_data = cbind(Time,final_EPA_agg_data)
+```
+
+AGGREGATE CLUSTER DATA AND COMBINE INTO ONE DATAFRAME
+
+```{r}
+countypops = CA_data %>% filter(Year > 2013) %>% select(Total_Pop,County,Year) %>% unique()
+countypops = cbind(countypops,Cluster = rep(clusterlabels$Cluster,each=6))
+countypops$County = rep(counties,each=6)
+
+temp_EPA_agg_data = data.frame(final_EPA_agg_data[1,-2])
+num_clus = length(unique(clusterlabels$Cluster))
+
+for (k in 1:num_clus){
+  
+  EPA_clus_k = data.frame(final_EPA_agg_data[1,-2])
+  
+  for (i in pollutants$parametercodes.code){
+  pollutant_data = final_EPA_agg_data %>% filter(Pollutant == i)
+
+  cluster_data = pollutant_data %>% filter(Cluster == k)
+  year = 2014
+  
+  for(j in 1:72){
+    cluster_data_j = cluster_data %>% filter(Time == j)
+    cluster_counties = countypops %>% filter(Cluster == k,Year == year)
+    
+    pops = countypops %>% filter(Year == year,Cluster == k) %>% select(Total_Pop) 
+    cluster.pop = sum(pops)
+    cluster.popweights = pops/cluster.pop
+    
+    value_wmean = weighted.mean(cluster_data_j$Value,cluster.popweights$Total_Pop)
+    aqi_wmean = weighted.mean(cluster_data_j$AQI,cluster.popweights$Total_Pop)
+    insert = data.frame(Time = j,value_wmean,aqi_wmean,
+                        Pollutant = i,Cluster = k)
+    colnames(insert) = colnames(EPA_clus_k)
+    
+    EPA_clus_k = rbind(EPA_clus_k,insert)
+    
+    if ((j>12) & (j<25)){
+      year = 2015
+    }
+    
+    else if ((j>24) & (j<37)){
+      year = 2016
+    }
+    
+    else if ((j>36) & (j<49)){
+      year = 2017
+    }
+    
+    else if ((j>48) & (j<61)){
+      year = 2018
+    }
+    
+    else if ((j>60) & (j<73)){
+      year = 2019
+    }
+    
+    else{
+      year = 2014
+    }
+  }
+  }
+  
+  EPA_clus_k = EPA_clus_k[-1,]
+  trueAQI = EPA_clus_k$AQI[1:72]
+  trueAQI = rep(trueAQI,7)
+  EPA_clus_k$AQI = trueAQI
+  rownames(EPA_clus_k) = NULL
+  
+  temp_EPA_agg_data = rbind(temp_EPA_agg_data,EPA_clus_k)
+  
+}
+
+final_EPA_agg_data = temp_EPA_agg_data[-1,]
+
+saveRDS(final_EPA_agg_data,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Final/final_8.1_EPA_agg_data_10.26.RData")
+
+final_EPA_agg_data = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Final/final_8.1_EPA_agg_data_10.26.RData")
+
+head(final_EPA_agg_data)
+```
+
+## Calculating gram matrix K from EPA data
+
+Once the EPA air quality data is queried and structured correctly, we can now calculate the gram matrix K which will characterize the dependence structure of air quality (across 7 different pollutants and AQI) over time. This is done by calculating the squared difference between all of the observations at two different time points e.g. 64 observations for Jan 2014 compared with the 64 observations for Feb 2014. The resulting matrix is 72x72, as it should since there are 72 months of observations (2014-2019). The length and scale hyperparameters have yet to be rigorously set at this juncture.
+
+NEED TO DO HYPERPARAMETER LEARNING TO SET LENGTH AND SCALE HYPERPARAMETERS HERE
+
+```{r,warning=FALSE}
+K_clus = matrix(0,nrow=72,ncol=72)
+i = 1
+j = 1
+sigma = 5
+
+for(t1 in unique(final_EPA_agg_data$Time)){
+  for (t2 in unique(final_EPA_agg_data$Time)){
+    A = final_EPA_agg_data %>% filter(Time == t1)
+    B = final_EPA_agg_data %>% filter(Time == t2)
+    AQIa = unique(A$AQI)
+    AQIb = unique(B$AQI)
+    
+    ABtest = c((A$Value-B$Value)^2,(AQIa-AQIb)^2) #8 clusters * 8 measurements 
+    K_clus[i,j] = exp(-mean(ABtest) / (2*sigma^2))
+    
+    j = j+1
+  }
+  
+  j = 1
+  i = i+1
+}
+
+#Heatmap of resulting K 
+library(reshape2)
+melted_cormat <- melt(K_clus)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+```
+
+## Cleaning and aggregating CalViDa mortality data
+
+# Imputing "\< 11" values in data with EM algorithm
+
+In the mortality dataset obtained from Cal-ViDa, all of the cells with small values i.e., less than 10 but not equal to 0, were censored. So in order to avoid using a truncated Poisson distribution, we decided to impute these censored values with an EM algorithm which is described below:
+
+For each county and month, we assume that the number of mortality follows a Poisson distribution with rate $\lambda_i = X_i \beta$. We will estimate this rate using a Poisson regression model.
+
+For observed counts, we know $P(Y_i = y_i) = \frac{\lambda_i^{y_i}e^{-\lambda_i}}{y_i!}$ for $1 \leq i \leq n_{obs}$ where $n_{obs}$ are the number of observations that are not censored out of the total observations $N$.
+
+For censored counts, we do not observe $Z_i$, but we know that $Z_i \in [1,10]$. So we can say that $P(Z_i \in [1,10]) = \sum_{j=1}^{10} \frac{\lambda_i^{j}e^{-\lambda_i}}{j!}$ for $n_{obs}+1 \leq i \leq N$.
+
+**Thus, the marginal likelihood of our observed mortality data can be written as:**
+
+$L(\beta ; Y_1,...,Y_{n_{obs}},W_{n_{obs}+1},...,W_N) = \Pi_{i=1}^{n_{obs}} \frac{\lambda_i^{y_i}e^{-\lambda_i}}{y_i!} * \Pi_{i=n_{obs}+1}^{N} \sum_{j=1}^{10} (\frac{\lambda_i^{j}e^{-\lambda_i}}{j!})$ which equals $\Pi_{i=1}^{n_{obs}} \frac{(X_i \beta)_i^{y_i}e^{-X_i \beta}}{y_i!} * \Pi_{i=n_{obs}+1}^{N} \sum_{j=1}^{10} (\frac{(X_i \beta)^{j}e^{-X_i \beta}}{j!})$
+
+Given the nature of this complicated marginal likelihood, we will use the EM algorithm to get maximum likelihood estimates (MLEs) of the unknown values $\beta$.
+
+The full likelihood of $\overrightarrow Y,\overrightarrow W,\overrightarrow Z$ is given by:
+
+$L(\beta;\overrightarrow Y,\overrightarrow W,\overrightarrow Z) = p(\overrightarrow Y,\overrightarrow Z | \beta) = \Pi_{i=1}^{n_{obs}} \frac{(X_i \beta)_i^{Y_i}e^{-X_i \beta}}{Y_i!} * \Pi_{i=n_{obs}+1}^{N} (\frac{(X_i \beta)^{Z_i}e^{-X_i \beta}}{Z_i!})$ where $1 \leq Z_i \leq 10$ and $P(\overrightarrow W | \overrightarrow Z) = 1$
+
+The corresponding log likelihood is given by:
+
+$log \; L(\beta,\overrightarrow Y,\overrightarrow W,\overrightarrow Z) = \sum_{i=1}^{n_{obs}} [Y_i log(X_i \beta) - X_i \beta - log(Y_i!)] + \sum_{i=n_{obs}+1}^N [Z_i log(X_i \beta) - X_i \beta - log(Z_i!)]$
+
+In other words, $(Z_i | \overrightarrow W_i,\beta^{(t)}) \sim TruncPois(X_i \beta)$ for $i \geq n_{obs}+1$
+
+**E-step: Finding the expected value of the log likelihood function of** $\beta$
+
+Let $Q(\beta | \beta^{(t)}) := E_{Z \sim (. | \overrightarrow Y,\overrightarrow W,\beta^{(t)})} [log \; p(\overrightarrow Y,\overrightarrow Z | \beta))]$
+
+i.e. the expected value of the log likelihood function of $\beta$, with respect to the current conditional distribution of $Z$ $p(Z | \overrightarrow Y,\overrightarrow W,\beta^{(t)})$
+
+So in our case,
+
+$Q(\beta | \beta^{(t)}) = \sum_{i=1}^{n_{obs}} [Y_i log(X_i \beta) - X_i \beta - log(Y_i!)] + \sum_{i=n_{obs}+1}^N [E[Z_i | \overrightarrow W_i,\beta^{(t)})] \; log(X_i \beta) - X_i \beta - E[log(Z_i!) | \overrightarrow W_i,\beta^{(t)}]]$
+
+**M-step: Finding the parameters that maximize** $Q(\beta | \beta^{(t)})$
+
+$\beta^{(t+1)} = arg \; max_{\beta} Q(\beta | \beta^{(t)})$
+
+So in our case, we need to maximize $Q(\beta | \beta^{(t)})$.
+
+$\beta^{(t+1)} = arg \; max_{\beta} \sum_{i=1}^{n_{obs}} [Y_i log(X_i \beta) - X_i \beta - log(Y_i!)] + \sum_{i=n_{obs}+1}^N [E[Z_i | \overrightarrow W_i,\beta^{(t)})] \; log(X_i \beta) - X_i \beta - E[log(Z_i! ) | \overrightarrow W_i,\beta^{(t)}]]$
+
+This is equivalent to fitting a Poisson regression in which the outcomes are $Y_i$ for $i \leq n_{obs}$ and censored values $Z_i$ by $E[Z_i | \overrightarrow W,\beta^{(t)})]$ for $i \geq n_{obs}+1$.
+
+**We coded this algorithm as follows:**
+
+First, we needed to get an initial estimate of our $\beta$ coefficients in our Poisson regression model. We included age group, county of death, cause of death (either influenza+pneumonia OR chronic lower respiratory disease), and month of death as covariates.
+
+To do this, we needed to perform an initial imputation to get a complete dataset to fit a model on. We decided to do this by making a crude estimation of the rate per 100,000 people $\lambda_i$. To do this, we calculated a population weighted mean of the number of deaths across all ages and months. However, we only had observed populations at the county level, not for each specific age group included in the mortality data. So using census data which told us the approximate populations for specific age groups (for all of California), we were able to calculate approximate population sizes for each of the age categories included in the mortality data. See death_byage2 for reference. Then using the ratio of a given county's population relative to the entire population of California, we were able to calculate approximations for the population size of each age group for each county in our mortality dataset. These served as the weights for our population weighted average of the rate of respiratory deaths in California.
+
+```{r,cache=TRUE,collapse=TRUE}
+population_age = read_xlsx("Population Categories.xlsx")
+#head(population_age)
+
+population_age = population_age[-(1:5),2]
+population_age$...2 = as.numeric(population_age$...2)
+
+#split under 5 category into < 1 and 1-4 years old 
+less1 = floor(population_age$...2[1]*0.2)
+onefour = floor(population_age$...2[1]*0.8)
+death_byage = population_age$...2[-1]
+death_byage = c(less1,onefour,death_byage)
+death_byage = death_byage[1:19]
+
+death_byage2 = death_byage[1:2]
+idx = seq(from = 3, to = 17, by = 2)
+for (i in idx){
+  death_byage2 = c(death_byage2,(death_byage[i]+death_byage[i+1]))
+}
+death_byage2 = c(death_byage2,death_byage[19])
+
+
+age_groups = unique(mortality$Age)
+death_byage2 = data.frame(cbind(age_groups,death_byage2))
+colnames(death_byage2) = c("Age_Group","Population_by_Age")
+death_byage2$Population_by_Age = as.numeric(death_byage2$Population_by_Age)
+#head(death_byage2)
+
+#2010-2019 population data for CA 
+USpops = read.csv("CA_census_pops1019.csv")
+CApops = USpops %>% filter(STNAME == "California") %>% select(CTYNAME,POPESTIMATE2019)
+counties = countycodes$value_represented #from EPA data file
+
+weights = CApops[(2:59),2]
+weights = weights/CApops[1,2]
+
+groups = unique(mortality$Age)
+step1 = 1
+step2 = 1
+
+for (i in counties){
+  for (j in groups){
+    idx = which(mortality$Age == j & mortality$County_of_Death == i)
+    mortality$Population[idx] = ceiling(death_byage2$Population[step1]*weights[step2])
+    step1 = step1+1
+  }  
+  step1 = 1
+  step2 = step2+1
+}
+
+mortality$logpop = log(mortality$Population)
+
+censored_idx = which(mortality$Total_Deaths == "<11")
+censorTF = mortality$Total_Deaths == "<11"
+mortality = cbind(mortality,censorTF)
+#head(mortality)
+```
+
+GETTING INITIAL GUESS FOR LAMBDA: AVG DEATHS (PER 100K PEOPLE) PER MONTH FOR ONE COUNTY
+
+```{r}
+uncensored_mortality = mortality %>% filter(censorTF == FALSE) %>% select(Total_Deaths,Population)
+uncensored_mortality$Total_Deaths = as.numeric(uncensored_mortality$Total_Deaths)
+
+theta = mean(uncensored_mortality$Total_Deaths*100000/uncensored_mortality$Population)
+```
+
+By using all the data, I obtained a crude initial guess for $\lambda$ of about 1.09. Using this initial estimate $\lambda$, we calculated the expected value for each $Z_i$ to get an initial imputed dataset. This dataset will be used to estimate a Poisson regression model which will give us our initial value for our actual parameters of interest $\beta$.
+
+FUNCTION FOR IMPUTING CENSORED VALUE BASED ON EXPECTATION GIVEN LAMBDA
+
+```{r}
+impute_small_values = function(lambda){
+  x = 1:10
+  p = dpois(x,lambda)
+  
+  value = sum(x*p)/sum(p)
+  return(value)
+}
+```
+
+INITIAL IMPUTATION:
+
+```{r}
+mortality2 = mortality
+mortality2$Total_Deaths[censored_idx] = 0.01
+mortality2$Total_Deaths = as.numeric(mortality2$Total_Deaths)
+
+for (i in censored_idx){
+  lambda = theta*mortality2$Population[i] / 100000
+  deaths = impute_small_values(lambda)
+  
+  mortality2$Total_Deaths[i] = floor(deaths)
+}
+```
+
+INITIAL REGRESSION MODELS:
+
+```{r}
+mortality2$Age = factor(mortality2$Age)
+mortality2$Cause_of_Death = factor(mortality2$Cause_of_Death)
+mortality2$Month = factor(mortality2$Month)
+
+pois_reg = glm(Total_Deaths ~ Age + Cause_of_Death + Month + offset(logpop), family = "poisson", data = mortality2)
+ZIP_reg = zeroinfl(Total_Deaths ~ Age + Cause_of_Death + Month + offset(logpop) | 1, data = mortality2, dist = "poisson", link = "logit")
+
+vec0 = coef(pois_reg)
+# vec0 = coef(ZIP_reg)
+
+summary(pois_reg)
+# summary(ZIP_reg)
+```
+
+Now that we have initialized our parameters, $\beta^{(0)}$, we can proceed with the EM algorithm until our parameters (the coefficients of our regression model), converge.
+
+The main steps implemented in the chunk below are:
+
+1.  Given a newly fitted Poisson regression model with parameter values $\beta^{(t)}$, take its fitted values for the $\lambda$'s corresponding to observations that were censored in the original mortality dataset
+
+2.  Use those fitted $\lambda$'s, calculate the expected value of our unknown values $Z$
+
+3.  Once all $Z_i$'s are imputed, we can use the now complete dataset to estimate the Poisson regression model again, which will produce the maximum likelihood estimate of our parameters $\beta$, these are our new values $\beta^{(t+1)}$.
+
+4.  Compare the difference between our new $\beta$ coefficient estimates with those from the previous iteration and either perform another iteration or stop the algorithm if the maximum difference between coefficients from different iterations is less than 0.01.
+
+Note: I experimented with a ZIP regression model as well but the log likelihood values at each iteration were generally higher for the Poisson regression model
+
+```{r}
+mortality3 = mortality2
+model = pois_reg
+
+model_diff = 100
+iter = 1
+vec0 = coef(model)
+
+while((model_diff > 0.01) & (iter < 10)){
+  
+  #impute data (should be between 1-10)
+  fvs = fitted.values(model)
+  
+  for (i in censored_idx){
+    deaths = impute_small_values(fvs[i])
+    mortality3$Total_Deaths[i] = floor(deaths)
+  }
+  
+  #fit model on "new" data
+  model = glm(Total_Deaths ~ Age + Cause_of_Death + Month + offset(logpop), family = "poisson", data = mortality3)
+  vec1 = coef(model)
+  
+  model_diff = max(abs(vec1 - vec0))
+  iter = iter+1
+  vec0 = vec1
+}
+
+final_pois_reg = model
+summary(final_pois_reg)
+
+logLik(final_pois_reg)
+```
+
+Now that we have imputed the censored "\< 11" values in the Cal-ViDa dataset, we will now aggregate the data to get total number of respiratory related deaths for each county for every month between 2014-2019, except for Sept-Dec 2014 which are unavailable for some reason.
+
+# Reformatting the data set (mainly aggregating)
+
+First, we wanted to combine the number of deaths from the two different causes into a total number of respiratory related deaths for each age group. Then, we combined the total number of deaths for each age group for a given month and county in a singular total for that month and county. 
+
+```{r,collapse=TRUE}
+#Aggregating by  cause of death
+data = mortality3
+
+data1 = data %>% filter(Cause_of_Death == "Chronic lower respiratory diseases")
+data2 = data %>% filter(Cause_of_Death == "Influenza and pneumonia")
+
+newdeaths = data1$Total_Deaths + data2$Total_Deaths
+data1$Total_Deaths = newdeaths
+
+respmortality = data1[,-5]
+
+
+#Creates total deaths by adding deaths of all age groups together 
+agg.respmortality = respmortality[1,]
+agg.respmortality$Age = as.character(agg.respmortality$Age)
+rows2 = seq(1,nrow(respmortality),11)
+
+for (i in rows2){
+  agg.respmortality[i,] = respmortality[i,]
+  agg.respmortality$Total_Deaths[i] = sum(respmortality$Total_Deaths[i:(i+10)])
+  agg.respmortality$Age[i] = "Everyone"
+}
+
+agg.respmortality = na.omit(agg.respmortality)
+rownames(agg.respmortality) = NULL
+total.respmortality = agg.respmortality[,-c(6:9)]
+```
+
+Reformat dataset into time series format (rows are counties, columns are months)
+
+Total deaths:
+
+```{r,cache=TRUE}
+months = unique(total.respmortality$Month_of_Death)
+years = sort(unique(total.respmortality$Year_of_Death))
+counties = unique(total.respmortality$County_of_Death)
+x = 0
+
+total.mortality.ts = matrix(1,nrow = 58, ncol = 72)
+
+for (k in counties){
+  county.ts = c()
+  x = x+1
+  
+  for (i in years){
+    for (j in months){
+      deaths = total.respmortality %>% filter(County_of_Death == k) %>%  filter(Year_of_Death == i) %>% filter(Month_of_Death == j) %>% select(Total_Deaths) %>% as.numeric()
+      county.ts = c(county.ts,deaths)
+    }
+  } 
+  
+  total.mortality.ts[x,] = county.ts
+}
+
+#Label time series data 
+total.mortality.ts = as.data.frame(total.mortality.ts)
+
+dates = c()
+x=1
+for (i in years){
+  for (j in months){
+    dates[x] = sprintf("%1.0f/%1.0f",j,i)
+    x = x+1
+  }
+}
+
+colnames(total.mortality.ts) = dates
+ID = c(1:58)
+total.mortality.ts = cbind(ID,counties,total.mortality.ts)
+
+total.mortality.ts = left_join(clusterlabels,total.mortality.ts,by = "counties")
+head(total.mortality.ts)
+```
+
+HOW MANY 0s DOES EACH COUNTY HAVE?
+
+```{r}
+numzeros_total = c()
+for (i in 1:58){
+  numzeros_total[i] = length(which(total.mortality.ts[i,3:74] == 0))
+}
+
+numzeros_total
+propzeros_total = numzeros_total/72
+
+length(which(propzeros_total > 0.85))
+countycodes$value_represented[which(propzeros_total > 0.75)]
+
+hist(propzeros_total,breaks = 20 ,xlab = "Proportion of months with 0 deaths",main = "Do some counties have more strings of 0s than others?")
+```
+
+One aspect of the data that we wanted to examine before proceeding with our analysis was the frequency in which there were 0 deaths in a given county for a month. This would inform us about whether a standard Poisson model or a zero inflated Poisson model would be more appropriate. What I did above was first calculate the proportion of months (out of 72) that had 0 deaths observed for each county. Then identified which counties had a proportion of 0s greater than 75%, 85%, etc. Then, I made a histogram which shows there are only a couple of counties (which have very small populations) that had a high frequency of 0s. The aggregation performed in previous steps addressed the zero inflation it appears. 
+
+AGGREGATING MORTALITY DATA INTO CLUSTERS AS OPPOSED TO EACH COUNTY (ALSO AGGREGATED TO MORTALITY RATE PER CLUSTER)
+
+Again, we want the number of respiratory related deaths at the cluster level, not the county level. So we once again aggregate the observations for each county in a given cluster. First, we simply add all the observations in cluster together to get a total number of respiratory related deaths for the months of 2014-2019 for each cluster. Then, we also calculated a mortality rate (per 100k people) for each cluster. This was done by taking the total number of deaths for a given cluster and dividing it by the total population of that cluster times 100,000 i.e. (deaths$*\frac{100000}{clusterpop}$). This second dataset will be used for our Gaussian process regression model which needs to be fit on a continuous response variable. 
+
+```{r,cache=FALSE}
+#County populations by year pulled from SoA data
+countypops = CA_data %>% filter(Year > 2013) %>% select(Total_Pop,County,Year) %>% unique()
+countypops = cbind(countypops,Cluster = rep(clusterlabels$Cluster,each=6))
+
+cluster_mortality_total = matrix(NA,nrow = 72,ncol = 8)
+
+cluster_mortality_rate = matrix(NA,nrow = 72,ncol = 8)
+
+for (i in 1:8){
+  cluster = total.mortality.ts %>% filter(Cluster == i)
+  year = 2014
+  
+  for(j in 1:72){
+    col = cluster[,j+3]
+    
+    #Sum of deaths across counties in a cluster
+    cluster_mortality_total[j,i] = sum(col)
+    
+    #Rate of deaths (per 100,000) across counties in a cluster
+    pops = countypops %>% filter(Year == year,Cluster == i) %>% select(Total_Pop)
+    cluster.pop = sum(pops)
+    cluster_mortality_rate[j,i] = (sum(col)/cluster.pop)*100000
+    
+    if ((j>12) & (j<25)){
+      year = 2015
+    }
+    
+    else if ((j>24) & (j<37)){
+      year = 2016
+    }
+    
+    else if ((j>36) & (j<49)){
+      year = 2017
+    }
+    
+    else if ((j>48) & (j<61)){
+      year = 2018
+    }
+    
+    else if ((j>60) & (j<73)){
+      year = 2019
+    }
+    
+    else{
+      year = 2014
+    }
+  }
+}
+
+#Time series of total deaths for each cluster
+colnames(cluster_mortality_total) = c("Cluster 1","Cluster 2",
+                                "Cluster 3","Cluster 4",
+                                "Cluster 5","Cluster 6","Cluster 7","Cluster 8")
+rownames(cluster_mortality_total) = colnames(total.mortality.ts[4:75])
+cluster_mortality_total = data.frame(cluster_mortality_total)
+
+head(cluster_mortality_total)
+
+
+#Time series of rate of deaths (per 100,000) for each cluster
+colnames(cluster_mortality_rate) = c("Cluster 1","Cluster 2",
+                                "Cluster 3","Cluster 4",
+                                "Cluster 5","Cluster 6","Cluster 7","Cluster 8")
+rownames(cluster_mortality_rate) = colnames(total.mortality.ts[4:75])
+cluster_mortality_rate = data.frame(cluster_mortality_rate)
+
+head(cluster_mortality_rate)
+
+# #Removes Sept-Dec 2014 NAs
+# cluster_mortality_total = na.omit(cluster_mortality_total)
+```
+
+MAKE A TIME SERIES FOR EACH CLUSTER:
+
+```{r}
+plot(ts(cluster_mortality_total$Cluster.1),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 1")
+
+plot(ts(cluster_mortality_total$Cluster.2),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 2")
+
+plot(ts(cluster_mortality_total$Cluster.3),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 3")
+
+plot(ts(cluster_mortality_total$Cluster.4),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 4")
+
+plot(ts(cluster_mortality_total$Cluster.5),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 5")
+
+plot(ts(cluster_mortality_total$Cluster.6),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 6")
+
+plot(ts(cluster_mortality_total$Cluster.7),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 7")
+
+plot(ts(cluster_mortality_total$Cluster.8),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 8")
+```
+
+## Fitting reference models: spatial GLMM, Besag-York-Mollie (BYM) model, Gaussian Process regression
+
+Now that all of the data from the SoA (used for SKATER and HUGE to get graph filter H), EPA (used to get gram matrix K), and Cal-ViDa (response) is downloaded, cleaned, and well formatted, we can now fit our kernel graph regression model as well as a few reference models, which we will compare against each other. For now, I have implemented a training-test data fitting approach to evaluating model performance.
+
+First, I created a test dataset (inla_test_data) which has variables ID (which represents the cluster label), ID2 (which is basically an index label), response (cluster mortality), time (time index label 1-72), and months (month label 1-12). The response column inherently has NA values for time points 9-12 because those were not provided in the original Cal-ViDa dataset, but other than that, all observations are included. In the training dataset, I decided to hold out the last 3 months of the data (70-72 or Oct-Dec 2019) so I replaced those response values with NAs. This is how you get INLA to make predictions/forecasts because it does so based on the posterior predictive distribution. 
+
+Next, I created a second training dataset specifically for the GP regression model because we would be fitting the GP on the rates of death not the counts. The training dataset is called inla_gp_data. While the GP model will fit and predict a rate not a count, we still want to compare its predictions with respect to counts, so the test dataset is the same as before (inla_test_data). Once the predictions of rate of death per 100k are obtained from the GPR model, we will convert them back into counts using the cluster populations. 
+
+```{r}
+response = t(cluster_mortality_total)
+response = as.vector(response)
+response = ceiling(response)
+
+response2 = t(cluster_mortality_rate)
+response2 = as.vector(response2)
+
+id = rep(c(1:8),72)
+id2 = 1:(8*72)
+time = rep(c(1:72),each = 8)
+
+inla_test_data = data.frame(id,id2,response,time)
+
+inla_test_data2 = data.frame(id,id2,response2,time)
+
+months = rep(c(1:12),each = 8)
+months = rep(months,6)
+inla_test_data = cbind(inla_test_data,months)
+
+#Experimented with defining each of these as factors
+# inla_test_data$id = factor(inla_test_data$id) 
+# inla_test_data$id2 = factor(inla_test_data$id2)
+# inla_test_data$time = factor(inla_test_data$time)
+inla_test_data$months = factor(inla_test_data$months)
+
+# response = replace_na(response,0.01)
+inla_gp_data = inla_test_data2
+
+year = rep(2014:2019,each = 12)
+inla_gp_data = cbind(inla_gp_data,year)
+
+###Split into training and test dataset to "impute" missing values 
+inla_train_data = inla_test_data
+
+#Remove missing data from dataset (rows 65-96)
+inla_train_data = inla_train_data[-c(65:96),]
+
+#Additionally omit values for months 70-72 
+omit_idx = which(inla_train_data$time >= 70)
+inla_train_data$response[omit_idx] = NA
+
+omit_idx = which(inla_gp_data$time >= 70)
+inla_gp_data$response2[omit_idx] = NA
+```
+
+# Fit a simple Poisson GLMM for our mortality data
+
+We wanted to compare the performance of our proposed model with a few reference models. The first one is a Poisson generalized linear mixed model. This model assumes the observed data follows a Poisson distribution and the hyperparameter $\lambda_i$ can be modeled using a mixed effects model with a log link.
+
+In other words,
+
+$Y_i \sim Pois(\lambda_i)$ for $i=1,...,8$ where $log(\lambda_i) = \beta_0 + \beta_1 months2 + ... + \beta_{11} months12 + u_i$ 
+
+where $u_i$ is a random effect that is distributed $MVN(0,\tau \Sigma)$
+
+We wanted the first reference model to be simple, so we assumed that the random effects $u_i$ are iid. This means that $\Sigma$ is simply a diagonal matrix of scaling factors. The hyperparameter $log(\tau)$ is by default assigned a $log \; \Gamma(1,0.00005)$ prior.
+
+```{r}
+#Fitting poisson glmm in INLA 
+#CHANGED TO MONTHS INSTEAD OF TIME
+ref_formula1 = response ~ months + f(id,model = "iid") #could use id or id2 
+ref_model1 = inla(ref_formula1,family = "poisson",data = inla_train_data)
+
+# summary(ref_model1)
+ref_model1$summary.fixed
+bri.hyperpar.summary(ref_model1)
+
+preds_ref_model1 = ref_model1$summary.fitted.values
+preds_ref_model1$mean = round(preds_ref_model1$mean)
+preds_ref_model1 = cbind(inla_train_data$id,inla_train_data$time,preds_ref_model1)
+colnames(preds_ref_model1) = c("id","time","mean","sd","0.025quant",
+                               "0.5quant","0.975quant","mode")
+
+#Exponentiating parameter to get better interpretation of estimates 
+multeff <- exp(ref_model1$summary.fixed$mean)
+names(multeff) <- ref_model1$names.fixed
+multeff
+```
+
+Note: SD for ID: standard deviation for the means (avg intensities) corresponding to the 8 different clusters was 1.84
+
+```{r}
+#Plot of each parameters' posterior density 
+mf <- melt(ref_model1$marginals.fixed)
+cf <- spread(mf,Var2,value)
+names(cf)[2] <- 'parameter'
+ggplot(cf,aes(x=x,y=y)) + geom_line()+facet_wrap(~ parameter, 
+           scales="free") + geom_vline(xintercept=0) + ylab("density")
+
+# #Could also use 
+# bri.fixed.plot(ref_model1) #option to plot them together = TRUE
+
+#Plot of precision of random effect (main hyperparameter of interest)
+sden <- data.frame(bri.hyper.sd(ref_model1$marginals.hyperpar[[1]]))
+    ggplot(sden,aes(x,y)) + geom_line() + ylab("density") + 
+           xlab("linear predictor")
+    
+# #Could also use 
+# bri.hyperpar.plot(ref_model1)
+```
+
+```{r,warning=FALSE}
+#Plot of posterior predictive estimates with credible interval bands OVERLAID on response
+
+for (i in 1:num_clus){
+  df = inla_train_data %>% filter(id == i) %>% select(response)
+  preds = preds_ref_model1 %>% filter(id == i) 
+  df = cbind(df,preds)
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+  print(post_pred_plot)
+}
+
+# #One call to ggplot (doesn't look as good)
+# preds_ref_model1 %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + facet_wrap(~ id)
+
+# #Combine plots with library patchwork
+# pp_plot_ref_model1.1 = preds_ref_model1 %>% filter(id == 1) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.2 = preds_ref_model1 %>% filter(id == 2) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.3 = preds_ref_model1 %>% filter(id == 3) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.4 = preds_ref_model1 %>% filter(id == 4) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.5 = preds_ref_model1 %>% filter(id == 5) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.6 = preds_ref_model1 %>% filter(id == 6) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.7 = preds_ref_model1 %>% filter(id == 7) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.8 = preds_ref_model1 %>% filter(id == 8) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model1.1 + pp_plot_ref_model1.2 + pp_plot_ref_model1.3 + pp_plot_ref_model1.4 + pp_plot_ref_model1.5 + pp_plot_ref_model1.6 + pp_plot_ref_model1.7 + pp_plot_ref_model1.8
+```
+
+# Fitting a Besag-York-Mollie model (gives same model?)
+
+For our second reference model, we decided to fit a Besag-York-Mollie model, which is a log-normal Poisson model with an intrinsic conditional autoregressive component to capture spatial autocorrelations i.e. a Besag model, plus a standard random effects term which is included to capture non-spatial heterogeneity. Obviously, this model is less naive than reference model 1 because it does not assume iid random effects.
+
+The BYM model can be written as,
+
+$Y_i \sim Pois(\lambda_i)$ for $i=1,...,8$ where $log(\lambda_i) = \beta_0 + \beta_1 months2 + ... + \beta_{11} months12 + \phi + u_i$ 
+
+where $p(\phi) \propto exp(-\frac{1}{2} \sum_{i \sim j} (\phi_i - \phi_j)^2)$ and $u_i$ is still a standard random effect that is distributed $MVN(0,\tau \Sigma)$. 
+
+Note: it is more commonly known that ICAR components are conditionally normally distributed.
+
+As one can see below, the summary outputs indicate that this model is very similar to the Poisson GLMM (reference model 1). The intercept and SD for the random effect component are estimated to almost the exact same as those estimated by the Poisson GLMM, indicating that including the spatial ICAR component is seemingly not very impactful.
+
+```{r}
+ref_formula2 = response ~ months + f(id, model = "bym", graph = huge.est) #ID2 in formula results in error 
+ref_model2 = inla(ref_formula2,family = "poisson",data = inla_train_data)
+
+ref_model2$summary.fixed
+bri.hyperpar.summary(ref_model2)
+
+preds_ref_model2 = ref_model2$summary.fitted.values
+preds_ref_model2$mean = round(preds_ref_model2$mean)
+preds_ref_model2 = cbind(inla_train_data$id,inla_train_data$time,preds_ref_model2)
+colnames(preds_ref_model2) = c("id","time","mean","sd","0.025quant",
+                               "0.5quant","0.975quant","mode")
+
+#Exponentiating parameter to get better interpretation of estimates 
+multeff <- exp(ref_model2$summary.fixed$mean)
+names(multeff) <- ref_model2$names.fixed
+multeff
+```
+
+```{r}
+#Plot of each parameters' posterior density 
+mf <- melt(ref_model2$marginals.fixed)
+cf <- spread(mf,Var2,value)
+names(cf)[2] <- 'parameter'
+ggplot(cf,aes(x=x,y=y)) + geom_line()+facet_wrap(~ parameter, 
+           scales="free") + geom_vline(xintercept=0) + ylab("density")
+
+# #Could also use 
+# bri.fixed.plot(ref_model2) #option to plot them together = TRUE
+
+#Plot of precision of random effect (main hyperparameter of interest)
+sden <- data.frame(bri.hyper.sd(ref_model2$marginals.hyperpar[[1]]))
+    ggplot(sden,aes(x,y)) + geom_line() + ylab("density") + 
+           xlab("linear predictor")
+    
+# #Could also use 
+# bri.hyperpar.plot(ref_model2)
+```
+
+```{r,warning=FALSE}
+#Plot of posterior predictive estimates with credible interval bands OVERLAID on response
+
+for (i in 1:num_clus){
+  df = inla_train_data %>% filter(id == i) %>% select(response)
+  preds = preds_ref_model2 %>% filter(id == i) 
+  df = cbind(df,preds)
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+  print(post_pred_plot)
+}
+
+# #One call to ggplot (doesn't look as good)
+# preds_ref_model2 %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + facet_wrap(~ id)
+
+# #Combine plots with library patchwork
+# pp_plot_ref_model2.1 = preds_ref_model2 %>% filter(id == 1) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.2 = preds_ref_model2 %>% filter(id == 2) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.3 = preds_ref_model2 %>% filter(id == 3) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.4 = preds_ref_model2 %>% filter(id == 4) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.5 = preds_ref_model2 %>% filter(id == 5) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.6 = preds_ref_model2 %>% filter(id == 6) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.7 = preds_ref_model2 %>% filter(id == 7) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.8 = preds_ref_model2 %>% filter(id == 8) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_ref_model2.1 + pp_plot_ref_model2.2 + pp_plot_ref_model2.3 + pp_plot_ref_model2.4 + pp_plot_ref_model2.5 + pp_plot_ref_model2.6 + pp_plot_ref_model2.7 + pp_plot_ref_model2.8
+```
+
+## Fitting a GP regression model
+
+The third and final reference model we wanted to fit was a simple Gaussian Process regression. However, since our response is not continuous, we had to model the corresponding rates first, then convert it back into counts.
+
+In other words, we used the rate of respiratory related mortality (per 100k people) for each cluster as our dependent variable for this model (see cluster_mortality_rate). Then after obtaining posterior predictive fitted values from our GP regression in INLA, I converted the estimated rates for each cluster back into counts by multiplying the rate value by the population of said cluster and dividing by 100,000 i.e.
+
+$\frac{Y_i}{population_i} = \frac{\lambda_i}{100000} = f(t) + \epsilon_i$ for $i=1,...,8$ where $f(t) \sim GP(m(t),k(t,t'))$ and $t = 1,...,72$
+
+In order for GP model estimation to be feasible in INLA, one has to solve the following SPDE: $(\kappa^2 - \Delta)^{\frac{\alpha}{2}} (\tau f(x) = W(x))$ where $\kappa$ is a scale parameter, $\Delta$ is the Laplacian, $\alpha$ is a smoothness parameter, $\tau$ relates to the variance of $f$, and $W(x)$ is a Gaussian white noise process of dimension $d$. The stationary solution $f$ turns out to have a Matern covariance of the form:
+
+$Cov(f(0),f(x)) = \frac{\sigma^2}{2^{\nu-1} \Gamma(\nu)} (\kappa ||x||)^{\nu} K_{\nu}(\kappa ||x||)$ where $K_{\nu}$ is a Matern family kernel, $\nu = \alpha - d/2$, and the marginal variance $\sigma^2 = \frac{\Gamma(\nu)}{\Gamma(\alpha)(4\pi)^{d/2}\kappa^{2\nu}\tau^2}$
+
+```{r,warning=FALSE}
+num_clus = max(inla_gp_data$id)
+cluster_rmse_gp = rep(0,num_clus)
+test_rmse_gp = rep(0,num_clus)
+
+for (i in 1:num_clus){
+  clus_gp_data = inla_gp_data %>% filter(id == i)
+  true_mortality = inla_test_data %>% filter(id == i)
+  
+  #Setting things up
+  nbasis = 12
+  mesh = inla.mesh.1d(seq(min(clus_gp_data$time),max(clus_gp_data$time)),length.out = nbasis,degree = 2)
+  
+  #Creating a SPDE object
+  alpha <- 2
+  nu <- alpha - 1/2
+  sigma0 <- sd(na.omit(clus_gp_data$response))
+  rho0 <- 0.25*(max(clus_gp_data$time) - min(clus_gp_data$time))
+  kappa0 <- sqrt(8 * nu)/rho0
+  tau0 <- 1 / (4 * kappa0^3 * sigma0^2)^0.5
+  spde <- inla.spde2.matern(mesh, alpha=alpha,
+                        B.tau = cbind(log(tau0), 1, 0),
+                        B.kappa = cbind(log(kappa0), 0, 1),
+                        theta.prior.prec = 1e-4)
+  
+  A = inla.spde.make.A(mesh,loc = clus_gp_data$time)
+  
+  #Even though 1-dimensional need to set an index
+  index <- inla.spde.make.index("sinc", n.spde = spde$n.spde)
+  
+  st.est <- inla.stack(data=list(y=clus_gp_data$response), A=list(A),
+                effects=list(index),  tag="est")
+  
+  #Fitting the model
+  gp_formula <- y ~ -1 + f(sinc, model=spde)
+  gp_data <- inla.stack.data(st.est)
+  
+  gpr_model <- inla(gp_formula, data=gp_data,  family="gaussian",
+        control.predictor= list(A=inla.stack.A(st.est), compute=TRUE))
+  
+  gpr_model$summary.fixed
+  bri.hyperpar.summary(gpr_model)
+  
+  preds_gpr = gpr_model$summary.fitted.values[1:72,]
+  
+  # CHANGE response TO response2 TO MODEL RATES
+  cluster_pop = countypops %>% filter(Cluster == i)
+
+  for (j in 1:72){
+    if ((j>12) & (j<25)){
+      population = cluster_pop %>% filter(Year == 2015) %>% select(Total_Pop) %>% sum()
+    }
+
+    else if ((j>24) & (j<37)){
+      population = cluster_pop %>% filter(Year == 2016) %>% select(Total_Pop) %>% sum()
+    }
+
+    else if ((j>36) & (j<49)){
+      population = cluster_pop %>% filter(Year == 2017) %>% select(Total_Pop) %>% sum()
+    }
+
+    else if ((j>48) & (j<61)){
+      population = cluster_pop %>% filter(Year == 2018) %>% select(Total_Pop) %>% sum()
+    }
+
+    else if ((j>60) & (j<73)){
+      population = cluster_pop %>% filter(Year == 2019) %>% select(Total_Pop) %>% sum()
+    }
+
+    else{
+      population = cluster_pop %>% filter(Year == 2014) %>% select(Total_Pop) %>% sum()
+    }
+
+    preds_gpr[j,] = ceiling(preds_gpr[j,]*population/100000)
+  }
+  
+  preds_gpr$mean = round(preds_gpr$mean)
+  
+  clus_id = rep(i,72)
+  clus_time = c(1:72)
+  preds_gpr = cbind(clus_id,clus_time,preds_gpr[,c(1,3,5)])
+  
+  df = data.frame(true_mortality$response,preds_gpr)
+  colnames(df) = c("response","id","time","mean","lcb","ucb")
+  
+  df.mean = mean(na.omit(df$response))
+  
+  test_data = inla_test_data %>% filter(id == i,time >= 70)
+  na_idx = which(is.na(df$response))
+  
+  test_data_mean = mean(test_data$response)
+  
+  rmse1 = sqrt(mean((df$response[-na_idx] - df$mean[-na_idx])^2))
+  rmse2 = sqrt(mean((test_data$response - df$mean[70:72])^2))
+  
+  cluster_rmse_gp[i] = rmse1 / df.mean
+  test_rmse_gp[i] = rmse2 / test_data_mean
+  
+  cluster_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lcb,ymax = ucb), alpha = 0.3)
+  
+  print(cluster_plot)
+  
+  # #Exponentiating parameter to get better interpretation of estimates
+  # multeff <- exp(gpr_model$summary.fixed)
+  # names(multeff) <- gpr_model$names.fixed
+  # multeff[-1]
+  
+  # #Plot of precision of random effect (main hyperparameter of interest)
+  # sden <- data.frame(bri.hyper.sd(gpr_model$marginals.hyperpar[[1]]))
+  #     ggplot(sden,aes(x,y)) + geom_line() + ylab("density") + 
+  #            xlab("linear predictor")
+  #     
+  # #Could also use
+  # bri.hyperpar.plot(gpr_model,together = FALSE)
+}
+
+cluster_rmse_gp
+test_rmse_gp
+```
+
+NOTE: The observed values for time points 70-72 are included in the plots above even though they were omitted in the fitting of the model. In the other reference models' plots, these points are not included. SHOULD THE TEST DATA POINTS BE INCLUDED IN THESE PLOTS OR NO? 
+
+## Fitting kernel graph regression model
+
+Finally, we fit our proposed model which we call a kernel graph regression model. It also takes the form of a latent Gaussian model as shown below:
+
+$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{it} | \textbf{X} = exp(\beta_0 + F_{it})$ 
+
+where $F_{it}$ is a Gaussian process defined as $\textbf{F} | \textbf{X} \sim GP(0,K \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(x_{t_1},x_{t_2})(H^2)_{n_1,n_2}$. 
+
+The key difference here is that the covariance matrix of this GP is specified by the kronecker product of $K$, which is the time kernel gram matrix calculated from the EPA air quality data, and $H$, which is the graph filter which is calculated from the adjacency matrix estimated by glasso using the HUGE package. This matrix is completely known and can be directly plugged into INLA as the covariance matrix of our underlying GP using the "generic0" specification as shown below:
+
+Load graph regression kernel:
+
+```{r}
+covGP = kronecker(K_clus,H^2)
+```
+
+GLMM with type 0 generic specification (known covariance matrix)
+
+```{r}
+# kgr_formula1 = response ~ months + f(id,model = "generic0",Cmatrix = covGP)
+kgr_formula2 = response ~ f(id2,model = "generic0",Cmatrix = covGP)
+kgr_model1 = inla(kgr_formula2, data = inla_train_data, family = "poisson")
+
+kgr_model1$summary.fixed
+bri.hyperpar.summary(kgr_model1)
+
+preds_kgr_model1 = kgr_model1$summary.fitted.values
+preds_kgr_model1$mean = round(preds_kgr_model1$mean)
+preds_kgr_model1 = cbind(inla_train_data$id,inla_train_data$time,preds_kgr_model1)
+colnames(preds_kgr_model1) = c("id","time","mean","sd","0.025quant",
+                               "0.5quant","0.975quant","mode")
+
+#Exponentiating parameter to get better interpretation of estimates 
+multeff <- exp(kgr_model1$summary.fixed$mean)
+names(multeff) <- kgr_model1$names.fixed
+multeff
+```
+
+```{r}
+#Plot of each parameters' posterior density 
+mf <- melt(kgr_model1$marginals.fixed)
+cf <- spread(mf,Var2,value)
+names(cf)[2] <- 'parameter'
+ggplot(cf,aes(x=x,y=y)) + geom_line()+facet_wrap(~ parameter, 
+           scales="free") + geom_vline(xintercept=0) + ylab("density")
+
+# #Could also use 
+# bri.fixed.plot(kgr_model1) #option to plot them together = TRUE
+
+# Plot of precision of random effect (main hyperparameter of interest)
+sden <- data.frame(bri.hyper.sd(kgr_model1$marginals.hyperpar[[1]]))
+    ggplot(sden,aes(x,y)) + geom_line() + ylab("density") +
+           xlab("linear predictor")
+    
+# #Could also use 
+# bri.hyperpar.plot(kgr_model1)
+```
+
+```{r,warning=FALSE}
+#Plot of posterior predictive estimates with credible interval bands OVERLAID on response
+
+for (i in 1:num_clus){
+  df = inla_train_data %>% filter(id == i) %>% select(response)
+  preds = preds_kgr_model1 %>% filter(id == i) 
+  df = cbind(df,preds)
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+  print(post_pred_plot)
+}
+
+# #One call to ggplot (doesn't look as good bc axes aren't clear)
+# preds_kgr_model1 %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + facet_wrap(~ id)
+
+# #Combine plots with library patchwork
+# pp_plot_kgr_model1.1 = preds_kgr_model1 %>% filter(id == 1) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.2 = preds_kgr_model1 %>% filter(id == 2) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.3 = preds_kgr_model1 %>% filter(id == 3) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.4 = preds_kgr_model1 %>% filter(id == 4) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.5 = preds_kgr_model1 %>% filter(id == 5) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.6 = preds_kgr_model1 %>% filter(id == 6) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.7 = preds_kgr_model1 %>% filter(id == 7) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.8 = preds_kgr_model1 %>% filter(id == 8) %>% ggplot(aes(x=time,y=mean)) + geom_line() + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3)
+# 
+# pp_plot_kgr_model1.1 + pp_plot_kgr_model1.2 + pp_plot_kgr_model1.3 + pp_plot_kgr_model1.4 + pp_plot_kgr_model1.5 + pp_plot_kgr_model1.6 + pp_plot_kgr_model1.7 + pp_plot_kgr_model1.8
+```
+
+# Plots of true mortality values
+
+```{r}
+true_mortality = inla_test_data
+true_mortality$time = as.numeric(true_mortality$time)
+
+#Combine plots with library patchwork
+true1 = true_mortality %>% filter(id == 1) %>% ggplot(aes(x=time,y=response)) + geom_line()
+
+true2 = true_mortality %>% filter(id == 2) %>% ggplot(aes(x=time,y=response)) + geom_line() 
+
+true3 = true_mortality %>% filter(id == 3) %>% ggplot(aes(x=time,y=response)) + geom_line() 
+
+true4 = true_mortality %>% filter(id == 4) %>% ggplot(aes(x=time,y=response)) + geom_line() 
+
+true5 = true_mortality %>% filter(id == 5) %>% ggplot(aes(x=time,y=response)) + geom_line()
+
+true6 = true_mortality %>% filter(id == 6) %>% ggplot(aes(x=time,y=response)) + geom_line()
+
+true7 = true_mortality %>% filter(id == 7) %>% ggplot(aes(x=time,y=response)) + geom_line()
+
+true8 = true_mortality %>% filter(id == 8) %>% ggplot(aes(x=time,y=response)) + geom_line()
+
+true1 + true2 + true3 + true4 + true5 + true6 + true7 + true8
+```
+
+# Comparing RMSE for different clusters between models
+
+One way to compare performance between the models fit above is to calculate RMSEs for each model's fit on each cluster's time series. Since INLA makes predictions based on the posterior predictive distribution, I actually calculated two sets of RMSEs. The first one is the RMSE of the predictions made by each model on the observed training data points i.e. not months 9-12 or 70-72. These were the observations that the models were fit on so we would expect small discrepancies between the observed values and the posterior predictive means for those time periods. The second one is the RMSE of the predictions made by each model on the test data points i.e. months 70-72. There was a lot more variation in the RMSEs calculated for these data points obviously. Note, we were unable to calculate any RMSE values for months 9-12 because we don't know what the true values were for those points. 
+
+Another important thing to note here is that the RMSEs calculated for each cluster were drastically different because the population sizes between clusters varied by a lot (think thousands compared to hundred thousands). So in order to make actual comparisons, the RMSEs had to be scaled which involves dividing the calculated RMSE by the average of the actual observed data points. The resulting RMSE values for each cluster, which are presented in tables below, can now be interpreted relative to the average number of respiratory related deaths in that cluster. 
+
+```{r}
+#Overall fit
+num_clus = length(unique(true_mortality$id))
+RMSE_table = matrix(nrow=2,ncol=num_clus)
+test_RMSE_table = matrix(nrow=2,ncol=num_clus)
+
+for (i in 1:num_clus){
+  actual = true_mortality %>% filter(id == i) %>% select(response) %>% data.frame()
+  
+  actual.mean = mean(na.omit(actual$response))
+  # actual.sd = sd(na.omit(actual$response))
+  
+  na_idx = which(is.na(actual$response))
+  actual2 = actual[-na_idx,]
+  actual2 = actual2[-(66:68)]
+
+  pm_1 = preds_ref_model1 %>% filter(id == i) %>% select(mean,sd) %>% data.frame()
+  pm_2 = preds_kgr_model1 %>% filter(id == i) %>% select(mean,sd) %>% data.frame()
+  
+  rmse1 = sqrt(mean((actual2 - pm_1$mean[-(66:68)])^2))
+  rmse2 = sqrt(mean((actual2 - pm_2$mean[-(66:68)])^2))
+  
+  rmse1 = rmse1 / actual.mean
+  rmse2 = rmse2 / actual.mean
+  
+  RMSE_table[,i] = c(rmse1,rmse2) 
+  
+  mean(pm_1$sd)
+  mean(pm_2$sd) 
+  
+  actual_test = actual[70:72,]
+  pm_1_test = pm_1[66:68,]
+  pm_2_test = pm_2[66:68,]
+  
+  actual_test_mean = mean(actual_test)
+  
+  test_rmse1 = sqrt(mean((actual_test - pm_1_test$mean)^2))
+  test_rmse2 = sqrt(mean((actual_test - pm_2_test$mean)^2))
+  
+  test_rmse1 = test_rmse1 / actual_test_mean
+  test_rmse2 = test_rmse2 / actual_test_mean
+  
+  test_RMSE_table[,i] = c(test_rmse1,test_rmse2) 
+}
+
+#Table 1: RMSE on all points (except missing and test observations)
+
+RMSE_table = data.frame(RMSE_table)
+RMSE_table = rbind(RMSE_table,cluster_rmse_gp)
+
+colnames(RMSE_table) = c("Cluster 1","Cluster 2","Cluster 3","Cluster 4",
+                         "Cluster 5", "Cluster 6", "Cluster 7", "Cluster 8")
+rownames(RMSE_table) = c("Poisson GLM model","KGR model", "GP model")
+
+RMSE_table
+
+#Table 2: RMSE on test dataset
+
+test_RMSE_table = data.frame(test_RMSE_table)
+
+###need to make GP predictions on test cases and attach
+test_RMSE_table = rbind(test_RMSE_table,test_rmse_gp) 
+
+colnames(test_RMSE_table) = c("Cluster 1","Cluster 2","Cluster 3","Cluster 4",
+                         "Cluster 5", "Cluster 6", "Cluster 7", "Cluster 8")
+rownames(test_RMSE_table) = c("Poisson GLM model","KGR model", "GP model")
+
+test_RMSE_table
+```
+
+## Sliding timeframe forecasting exercise:
+
+In this section, I implemented a forecasting exercise in which I start with 36 months of training data. I will use that data to estimate a model and then forecast 6 months ahead. Using months 13-36 AND the forecasted values, I will re-estimate the model and forecast again to get the next 6 months. This process continues until the original 36 months of data have been used to produce a complete time series of 72 months (the last 3 years are forecasted). This exercise gives us another way to compare the predictive ability of our various models. 
+
+```{r,cache=TRUE}
+starting_data = inla_test_data[1:288,]
+starting_data$months = as.numeric(starting_data$months)
+rownames(starting_data) = NULL
+
+while(max(starting_data$time) < 72){
+  
+  #Attaches df for next 6 months with NAs in response
+  end = nrow(starting_data)
+  id = rep(1:8,6)
+  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+48)
+  response = rep(NA,48)
+  time = rep((starting_data$time[end]+1):(starting_data$time[end]+6),each=8)
+  
+  if (starting_data$months[end] == 6){
+    months = rep(c(7,8,9,10,11,12),each=8)
+  } else if (starting_data$months[end] == 12){
+    months = rep(c(1,2,3,4,5,6),each=8)
+  }
+  
+  new_data = data.frame(id,id2,response,time,months)
+  starting_data = rbind(starting_data,new_data)
+  starting_data$months = factor(starting_data$months)
+  
+  #Fit models on most recent 36 months
+  starting_data_subset = starting_data[(nrow(starting_data)-335):nrow(starting_data),]
+  
+  #Model 1
+  # ref_formula1 = response ~ months + f(id,model = "iid")
+  # ref_model1 = inla(ref_formula1,family = "poisson",data = starting_data)
+  # 
+  # preds_ref_model1 = ref_model1$summary.fitted.values
+  # preds_ref_model1$mean = round(preds_ref_model1$mean)
+  
+  #KGR model
+  kgr_formula2 = response ~ f(id,model = "generic0",Cmatrix = covGP[c(starting_data_subset$id2),c(starting_data_subset$id2)])
+  #kgr_formula2 = response ~ f(id2,model = "generic0",Cmatrix = covGP[c(starting_data_subset$id2),c(starting_data_subset$id2)])
+  kgr_model1 = inla(kgr_formula2, data = starting_data_subset, family = "poisson")
+
+  preds_kgr_model1 = kgr_model1$summary.fitted.values
+  preds_kgr_model1$mean = round(preds_kgr_model1$mean)
+  
+  #Fill in predicted posterior means to NAs in starting_data
+  special_preds = preds_ref_model1$mean[65:96]
+  starting_data$response[65:96] = special_preds
+  
+  pred_data = preds_ref_model1$mean[(end+1):(end+48)]
+  starting_data$response[(end+1):(end+48)] = pred_data
+  
+  starting_data$response = replace(starting_data$response,which(starting_data$response < 0),0)
+  starting_data$months = as.numeric(starting_data$months)
+}
+```
+
+```{r,warning=FALSE}
+#Plot of posterior predictive estimates (months 37-72) with credible interval bands OVERLAID on response\
+for (i in 1:num_clus){
+  df = true_mortality %>% filter(id == i) %>% select(response)
+  preds = starting_data %>% filter(id == i) 
+  colnames(preds)[3] = "mean"
+  df = cbind(df,preds)
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_vline(xintercept = 36,linetype = "dashed",color = "blue",linewidth = 1.5)
+  print(post_pred_plot)
+}
+```
+
