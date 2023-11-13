@@ -5,13 +5,21 @@ The main research question being addressed here is: What is the effect of wildfi
 
 To answer this question, we will be applying a novel spatiotemporal modeling framework that incorporates complex dependence structures into a model separately in a parsimonious and interpretable fashion. First, we will define a partially observed graph with nodes representing each zipcode of California and learn its structure. Then, we will use that learned structure to estimate the underlying signal of the graph. Finally, we will use that signal to estimate values for unobserved nodes of the graph i.e. predicting counterfactual values that we were not able to observe. 
 
-Project 1: In the first project, we simply wanted to establish a procedure for building a model and making predictions at each county in California that is easy to implement and computationally efficient. While we tried to request the data needed for project 2 from the HCAI, we chose to use a dataset on respiratory related mortality from 2014-2019 from Cal-ViData as our response variable for project 1. 
+Project 1: In the first project, we simply want to establish a procedure for building a model and making predictions at each county in California that is easy to implement and computationally efficient. While we tried to request the data needed for project 2 from the HCAI, we chose to use a dataset on respiratory related mortality from 2014-2019 from Cal-ViData as our response variable for project 1. 
 
-Project 2: In the second project, we wanted to apply our procedure in a causal inference setting. The predictions that our model makes, based on the observed data from regions that did not experience a wildfire, will be for "missing" counterfactual outcomes (respiratory related hospitalizations from the HCAI) i.e. outcomes if no wildfire had occurred in a given area. This way, we will be able to make a comparison in order to ascertain the causal effect of wildfires on respiratory related comorbidities. 
+Project 2: In the second project, we want to apply our procedure in a causal inference setting. We use our procedure to make predictions for the number of respiratory related hospitalizations in regions that experienced a wildfire, based on the observed data from regions that did not experience a wildfire. These predictions can be thought of as "missing" counterfactual outcomes i.e. outcomes if no wildfire had occurred in a given area. Therefore, we will be able to make a comparison and ascertain the causal effect of wildfires on respiratory related comorbidities. 
 
 --------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-The file to start with is SoA County Data Analysis.Rmd. It is good to run this file first before experimenting with any of the secondary files as there may be some dependencies as it contains the first steps of the analysis. THE FILES IN THE SUPPLEMENTARY FOLDER ARE NOT NECESSARY TO RUN IN ORDER TO EXECUTE OUR MODELING PROCEDURE??? 
+PROJECT 1: 
+
+Data folder: 
+
+This folder contains all the datasets and geographic files needed to run the analysis from project 1. The shapefiles are needed to create a spatial data frame (SPDF) for the SKATER step. The Cal-ViDa dataset contains our response variable: respiratory related mortality for each county. The SoA dataset contains social deprivation score data for each county. Finally, the EPA folder contains air quality data that I queried from the EPA's website. Downloading the aggregated folder which has the daily data from 7 different pollutants combined and aggregated into one dataset for each year (at the county and monthly level) should be sufficient to carry through the steps of the analysis; otherwise, one can just download the final aggregated dataset which is just one singular dataframe. If all else fails, one can download Workspace9.11 which should have all the objects necessary to run the analysis as well. 
+
+Exploratory Analysis folder: 
+
+Main Analysis folder: 
 
 1. Covariance Matrix Filling Functions.Rmd (SUPPLEMENTARY) 
 
