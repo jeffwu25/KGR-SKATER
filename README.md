@@ -33,6 +33,8 @@ Experiments with different aspects of the HUGE (high-dimensional undirected grap
 
 4. HUGE-model-simulations-2.Rmd
 
+More experiments with the HUGE package. The main objective of this file is to determine whether or not estimating a graph with edges is appropriate for this project. First, partial correlations are calculated between the residuals of various linear regression models. Next, a series of experiments are conducted to understand the sensitivity of the estimated graphs produced by toggling with each of the inputs in the huge() and huge.select() functions e.g. tuning parameters lambda (in huge), gamma (for EBIC in huge.select) or stars.thresh (for STARS in huge.select) 
+
 5. Ideal-Cluster-Number.Rmd
 
 Explores how many clusters might be optimal for SKATER to cluster the counties of California into. The two R functions we used for evaluating the ideal number of clusters were: fviz_nbclust() and silhouette(). These functions perform the same procedure of calculating the average width for different numbers of clusters but in slightly different ways. We used these two functions to compare clustering results across different subsets of SoA subindices in a stepwise manner to get an idea of how many clusters we want SKATER to create later on. 
@@ -55,7 +57,7 @@ Confirms that the SKATER algorithm is correctly grouping units together based on
 
 10. Synthetic-INLA.Rmd
 
-
+Tests the implementation of various INLA models which will be included as reference models in project 1. We fit a Poisson GLMM, a Besag-York-Mollie model, and our proposed kernel graph regression model to data simulated from a Log Gaussian Cox Process to make sure that the model is being specified and working correctly going into the actual application study. Additionally, the Poisson GLMM model is fit on two more synthetic datasets: (1) a Poisson process with a fixed intensity and a seasonal pattern and (2) a Poisson process with a deterministic intensity (linearly increasing) and a seasonal pattern.  
 
 Main Analysis folder: 
 
