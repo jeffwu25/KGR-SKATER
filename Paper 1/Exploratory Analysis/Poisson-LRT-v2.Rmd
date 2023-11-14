@@ -1,0 +1,231 @@
+---
+title: "Likelihood Ratio Test"
+author: "Jeffrey Wu"
+date: "2023-08-16"
+output: pdf_document
+---
+
+FILTER TO ONE AGE GROUP AND ONE CAUSE OF DEATH: 75-84 yr old / CLRD
+
+Convert $\lambda$ which is population weighted rate to $\theta$ 
+
+Let $\lambda =$ death rate per 100,000 people and let $\theta = \frac{\lambda N}{100000}$ (one per county)
+
+Write likelihood for one county each month then sum over all months
+
+## Truncated Poisson:
+
+$P(X=0) = \frac{\theta^0 e^{-\theta}}{0!} = e^{-\theta}$
+
+$P(1 \leq X \leq 10) = P(X \in TC) = \sum_{x=1}^{10}\frac{\theta^x e^{-\theta}}{x!} = e^{-\theta} p(\theta)$
+
+$P(X=x) = \frac{\theta^x e^{-\theta}}{x!} for x \geq 11$
+
+Combine these together to get the likelihood for our truncated Poisson distribution
+
+$l(\vec{x_c}) = \Pi_{y=1}^6 \Pi_{m=1}^{12} (e^{-\theta})^{I(x_{cym} = 0 )} (p(\theta) e^{-\theta})^{I( x_{cym} \in TC )} (\frac{\theta^{x_{cym}} e^{-\theta}}{x_{cym} !})^{I(x_{cym} \geq 11)}$
+
+Calculate log likelihood:
+
+$log l(\vec{x_c}) = \sum_{y=1}^6 \sum_{m=1}^{12} [-\theta_c + log p(\theta_c)*I( x_{cym} \in TC ) + (x_{cym} log \theta_c - log(x_{cym}!))*I( x_{cym} \geq 11 ) ]$
+
+```{r}
+#Defining log likelihood for truncated Poisson 
+model1_ll = function(x,theta){
+  v = 1:10
+  ptheta = sum(theta^v / gamma(v+1))
+  ll = 0
+    
+  for(i in 1:length(x)){
+    value = -theta + log(ptheta)*(x[i] > 0 & x[i] <= 10)  + (x[i]*log(theta))*(x[i] >= 11) #no need for constant term log(x[i]!)
+    ll = ll + value
+  }
+  
+  return(ll)
+}
+```
+
+## Truncated ZIP
+
+$P(X=0) = w + (1-w) e^{-\theta}$
+
+$P(1 \leq X \leq 10) = P(X \in TC) = (1-w) \sum_{x=1}^{10} \frac{\theta^x e^{-\theta}}{x!} = (1-w) e^{-\theta} p(\theta)$
+
+$P(X=x) = (1-w) \frac{\theta^x e^{-\theta}}{x!} for x \geq 11$
+
+Combine these together to get the likelihood for our truncated Poisson distribution
+
+$l(\vec{x_c}) = \Pi_{y=1}^6 \Pi_{m=1}^{12} (w + (1-w) e^{-\theta})^{I( x_{cym} = 0 )} ((1-w) e^{-\theta} p(\theta))^{I( x_{cym} \in TC )} ((1-w) \frac{\theta^x e^{-\theta}}{x_{cym}!})^{I( x_{cym} \geq 11 )}$
+
+Calculate log likelihood:
+
+$log l(\vec{x}) = \sum_{y=1}^6 \sum_{m=1}^{12} [log(w + (1-w) e^{-\theta})*I( x_{cym} = 0 ) + log(log(1-w) + log(p(\theta_c)) - \theta)*I( x_{cym} \in TC ) + (log(1-w) + x_{cym} log \theta_c - log(x_{cym}!))*I( x_{cym} \geq 11 ) ]$
+
+```{r}
+#Define log likelihood of truncated ZIP
+model2_ll = function(x,theta,w){
+  v = 1:10
+  ptheta = sum( (theta^v) / (gamma(v+1)) )
+  ll = 0
+    
+  for(i in 1:length(x)){
+    
+    value1 = (log(w + (1-w)*exp(-theta))) * (x[i] == 0) 
+    value2 = (log(1-w) + log(ptheta) - theta) * (x[i] > 0 & x[i] <= 10)
+    value3 = (log(1-w) + x[i]*log(theta) - theta) * (x[i] >= 11) #no need for constant term log(x[i]!)
+  
+    ll = ll + (value1 + value2 + value3)
+  }
+  
+  return(ll)
+}
+```
+
+## LRT function for Truncated Poisson vs ZIP
+
+Load data:
+
+```{r,include=FALSE,warning=FALSE}
+library(dplyr) 
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(zoo)
+library(ggplot2)
+library(urbnmapr)
+library(devtools)
+library(readxl)
+library(spdep)
+library(sp)
+library(INLA)
+library(HMMpa)
+library(invgamma)
+```
+
+
+```{r,cache=TRUE,include=FALSE}
+mortality = read_xlsx("RespiratoryMortality1423.xlsx")
+mortality = filter(mortality,Cause_of_Death %in% c("Chronic lower respiratory diseases","Influenza and pneumonia"))
+mortality = filter(mortality,Year_of_Death < 2020)
+
+colnames(mortality)[1:3] = c("Year","Month","County")
+
+CA.counties2 = read.csv("counties.ca.data.csv")
+CA_fips = CA.counties2[order(CA.counties2$county),]
+ca.coordinates = data.frame(CA_fips$county, CA_fips$lat,CA_fips$lng, CA_fips$county_fips)
+colnames(ca.coordinates) = c("County","Lat","Long","County_fips")
+row.names(ca.coordinates) = NULL
+
+#Attach county fips, lat and long coordinates to observations 
+mortality2 <- left_join(ca.coordinates, mortality, by = "County")
+
+idx0 = which(mortality2$Total_Deaths == "0")
+idx11 = which(mortality2$Total_Deaths == "<11")
+
+mortality2$Total_Deaths[idx11] = 3 #CHANGE BACK TO 0 AFTER LRT 
+
+mortality2$Age = factor(mortality2$Age)
+mortality2$Total_Deaths = as.numeric(mortality2$Total_Deaths)
+```
+
+Define this LRT into a function: 
+
+Our hypotheses for these LRTs are: 
+
+H0: standard Poisson model is appropriate fit for the mortality dataset
+
+HA: a zero-inflated Poisson model is a better fit for the mortality dataset than the standard Poisson model
+
+
+```{r}
+ws = seq(0.01,0.99,length.out=100)
+
+#agegroups are of the form: Less than 1 year , 55 - 64 years , 85 years and over
+#cause can take values: Chronic lower respiratory diseases OR Influenza and pneumonia
+
+PoissonLRT = function(dataset, agegroup = "55 - 64 years",cause = "Chronic lower respiratory diseases", county, alpha = 0.05){
+
+  x = dataset %>% filter(Age == agegroup, Cause_of_Death == cause) %>% filter(County == county) %>% arrange(Year) 
+  x = x$Total_Deaths
+  maxval = max(x)
+  if(maxval == 0){maxval = 1}
+
+  thetas = seq(0.001,maxval,length.out=100) 
+  
+  ###Find maximum likelihood for model 1
+  
+  result1 = matrix(0,nrow=length(thetas),ncol=2)
+  count = 0
+  
+  for (theta in thetas){
+      count = count+1
+      result1[count,] = c(theta, model1_ll(x,theta))
+  }
+  
+  result1 = data.frame(result1)
+  colnames(result1) = c("theta","ll1")
+  idx1 = which(result1$ll1 == max(result1$ll1))
+  
+  ll1 = result1[idx1,]$ll1
+  
+  ###Find maximum likelihood for model 2
+  
+  result2 = matrix(0,nrow=length(thetas)*length(ws),ncol=3)
+  count = 0
+  
+  for (theta in thetas){
+    for (w in ws){
+      count = count+1
+      result2[count,] = c(theta, w , model2_ll(x,theta,w))
+    }
+  }
+  
+  result2 = data.frame(result2)
+  colnames(result2) = c("theta","w","ll2")
+  idx2 = which(result2$ll2 == max(result2$ll2))
+  
+  ll2 = result2[idx2,]$ll2
+  
+  ###Perform LRT 
+  
+  TS = 2*(ll2 - ll1) #distributed chi-sq df1
+  pvalue = 1-pchisq(TS,df = 1)
+  
+  decision = (pvalue < alpha)
+  
+  result_vec = c(county,round(as.numeric(result1$theta[idx1]),2),
+                 round(as.numeric(ll1),2),round(as.numeric(result2$theta[idx2]),2),
+                 round(as.numeric(ll2),2),round(as.numeric(TS),2),
+                 round(as.numeric(pvalue),2),decision) #TRUE means reject H0
+  
+  return(result_vec)
+}
+
+test = PoissonLRT(dataset = mortality2,county = "Alpine")
+```
+
+
+## PERFORM LRT FOR EVERY COUNTY
+
+```{r}
+LRT_results = matrix(NA,nrow = 58, ncol = 8)
+counties = unique(mortality2$County)
+
+for (i in 1:58){
+  LRT_results[i,] = PoissonLRT(mortality2,agegroup = "75 - 84 years",county = counties[i])
+}
+
+LRT_results = data.frame(LRT_results)
+colnames(LRT_results) = c("County","Theta Model 1","Likelihood Model 1",
+                          "Theta Model 2","Likelihood Model 2","Test Statistic",
+                          "p-value","Reject H0?")
+
+###ROUND TO TWO DECIMAL PLACES
+head(LRT_results,10)
+```
+
+
+
+##WHICHEVER MODEL WINS COMPARE WITH MODEL 3 (TRUNCATED ZIP MODEL FOR EACH QUARTER)
+
+To maximize likelihood here, just call model2_ll 4x with the subsetted quarterly datasets and get 4 max lls -\> add those 4 max ll values together to get ll3
