@@ -1,4 +1,4 @@
-# causalKGR
+### causalKGR
 Code for implementing spatially clustered kernel graph regression with INLA for high dimensional data (with causal inference extensions)
 
 The main research question being addressed here is: What is the effect of wildfires on respiratory related comorbidities each day following significant wildfires in California? 
@@ -11,13 +11,13 @@ Project 2: In the second project, we want to apply our procedure in a causal inf
 
 --------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-PROJECT 1: 
+## PROJECT 1: 
 
-Data folder: 
+# Data folder: 
 
 This folder contains all the datasets and geographic files needed to run the analysis from project 1. The shapefiles are needed to create a spatial data frame (SPDF) for the SKATER step. The Cal-ViDa dataset contains our response variable: respiratory related mortality for each county. The SoA dataset contains social deprivation score data for each county. Finally, the EPA folder contains air quality data that I queried from the EPA's website. Downloading the aggregated folder which has the daily data from 7 different pollutants combined and aggregated into one dataset for each year (at the county and monthly level) should be sufficient to carry through the steps of the analysis; otherwise, one can just download the final aggregated dataset which is just one singular dataframe. If all else fails, one can download Workspace9.11 which should have all the objects necessary to run the analysis as well. 
 
-Exploratory Analysis folder: 
+# Exploratory Analysis folder: 
 
 1. Covariance-Matrix-Filling-Functions.Rmd 
 
@@ -59,7 +59,7 @@ Confirms that the SKATER algorithm is correctly grouping units together based on
 
 Tests the implementation of various INLA models which will be included as reference models in project 1. We fit a Poisson GLMM, a Besag-York-Mollie model, and our proposed kernel graph regression model to data simulated from a Log Gaussian Cox Process to make sure that the model is being specified and working correctly going into the actual application study. Additionally, the Poisson GLMM model is fit on two more synthetic datasets: (1) a Poisson process with a fixed intensity and a seasonal pattern and (2) a Poisson process with a deterministic intensity (linearly increasing) and a seasonal pattern.  
 
-Main Analysis folder: 
+# Main Analysis folder: 
 
 1. EPA-Data-Download-v6.Rmd (latest two versions included) 
 
