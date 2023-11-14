@@ -1,4 +1,4 @@
-# stgci
+# causalKGR
 Code for implementing spatially clustered kernel graph regression with INLA for high dimensional data (with causal inference extensions)
 
 The main research question being addressed here is: What is the effect of wildfires on respiratory related comorbidities each day following significant wildfires in California? 
@@ -49,7 +49,7 @@ Imputes "< 11" values from the "respmortality1423.csv" dataset via the EM algori
 
 8. Poisson-LRT-v2.Rmd 
 
-Implements a likelihood ratio test (basically a hypothesis test) to see whether a standard Poisson and zero-inflated Poisson distribution is more appropriate for our mortality dataset. (Work in progress) 
+Implements a likelihood ratio test to see whether a standard Poisson and zero-inflated Poisson distribution is more appropriate for our mortality dataset. This is basically a hypothesis test to see whether going from one model to another increases the log likelihood by a statistically significant amount. 
 
 9. SKATERvalidation.Rmd
 
@@ -61,16 +61,22 @@ Tests the implementation of various INLA models which will be included as refere
 
 Main Analysis folder: 
 
-1. EPA Data Download.Rmd (MAIN) 
+1. EPA-Data-Download-v6.Rmd (latest two versions included) 
 
-Downloads, cleans, and aggregates data sourced from the US EPA air quality system API, with the end goal of calculating a kernel gram matrix K which relates measurements of different pollutants together across time. This involves identifying a good set of EPA stations that exhibit a good spatial coverage of air quality levels across California. Certain stations only measure certain pollutants, certain counties do not have measurements for all counties, and certain stations are missing data, which made this more complicated. Once, the data is obtained from this set of stations, it needs to be aggregated from the daily to monthly level and put into a single dataframe, which makes calculating K relatively straightforward. 
+Downloads, cleans, and aggregates data sourced from the US EPA air quality system API, with the end goal of calculating a kernel gram matrix K which relates measurements of different pollutants together across time. This involves identifying a good set of EPA stations that exhibit a good spatial coverage of air quality levels across California. Certain stations only measure certain pollutants, certain counties do not have measurements for all counties, and certain stations are missing data, which made this more complicated. Once, the data is obtained from this set of stations, it needs to be aggregated from the daily to monthly level, from the county to the cluster level, and then put into a single dataframe. This makes calculating K relatively straightforward. 
 
-2. Mortality Analysis.Rmd (MAIN) 
+2. INLA-Mortality-8.1.Rmd (and 8.2)
+
+Synthesizes all the individual steps of our proposed procedure into a single markdown. Most of the code is from the other files in this main analysis folder and some from the exploratory analysis folder. However, this file has more supplementary text and figures than the others which should make it more informative to go through top to bottom for those interested in understanding the high level steps of the analysis performed for this project. The finer steps and details of our procedure are only included in the other files in this folder. The knitted versions of these markdowns are included as well. Note, the number following INLA-Mortality e.g. 8.1 denotes that 8 clusters were used in the SKATER clustering step and that setting 1 was used (unconstrained). This number is important because we consider many numbers of clusters (from 5 to 10) and each of the 3 settings for each of those numbers as a separate fitted model. Hence, there are 18 different models which we fit and evaluate the performance of in the end.  
+
+3. Main-Mortality-Analysis-v3.Rmd (latest two versions included) 
 
 Downloads "RespiratoryMortality1423.xlsx" dataset and explores the patterns in respiratory related mortality across age groups, counties, and years across California. Primarily, we want to see the frequency of 0 or "< 11" values in the total death columns because this affects whether we use a standard Poisson or zero-inflated Poisson model for our response and whether we should apply a truncation to that distribution because "< 11" is not easy to work with. We ended up deciding to impute all of the "< 11" values in order to avoid using a truncated distribution. This imputation was carried out in a separate file (see Mortality EM Algorithm AND ... files) 
 
-3. SoA County Data Analysis (MAIN) 
+4. SoA-Data-Analysis-v3.Rmd (latest two versions included)
 
 Downloads "SoA.data.1019.xlsx" dataset and performs the first two steps of our proposed procedure. First, spatially contiguous clusters are generated using SKATER by pruning a minimum spanning tree. Then, the deprivation score data from the SoA is aggregated into their respective clusters via a population weighted mean and fed into the HUGE function, which estimates the optimal graph structure i.e. which edges are present between the nodes (which represent the clusters). The HUGE function has several options for estimation method and choice of regularization which can result in different resulting graphs. Finally, we take the adjacency matrix from our HUGE output and apply a graph filter transformation to obtain our graph filter H (see "GLS Kernel Regression for Network-Structured Data" by Antonian et al. 2021) for the equations. 
 
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+PROJECT 2: 
