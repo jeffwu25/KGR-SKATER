@@ -1,0 +1,130 @@
+---
+title: "Plot graph on map"
+author: "Jeffrey Wu"
+date: "2024-07-07"
+output: html_document
+---
+
+```{r}
+library(assertthat)
+library(dplyr)
+library(purrr)
+library(igraph)
+library(ggplot2)
+library(ggraph)
+library(ggmap)
+library(sf)
+library(tidyverse)
+library(ggrepel)
+```
+
+Find centroid for each cluster
+
+```{r,warning=FALSE}
+CA_sf <- st_transform(CA_sf, crs = 4326)
+test = arrange(CA_sf,COUNTYFP)
+
+cluster_df = data.frame(
+  COUNTYFP = test$COUNTYFP,
+  Cluster = clusterlabels$Cluster
+)
+
+CA_sf = inner_join(CA_sf,cluster_df,by="COUNTYFP")
+
+# Calculate the centroids for each county
+a <- CA_sf %>%
+  mutate(centroid = st_centroid(geometry))
+
+st_centroid_within_poly <- function (poly) {
+
+  # check if centroid is in polygon
+  centroid <- poly %>% st_centroid() 
+  in_poly <- st_within(centroid, poly, sparse = F)[[1]] 
+
+  # if it is, return that centroid
+  if (in_poly) return(centroid) 
+
+  # if not, calculate a point on the surface and return that
+  centroid_in_poly <- st_point_on_surface(poly) 
+  return(centroid_in_poly)
+}
+
+# a3 <- a  %>% filter(Cluster == 1) %>% summarize(test = st_combine(centroid)) %>% 
+#   st_sf() %>% st_centroid_within_poly() %>% st_coordinates(x.test)
+# colnames(a3) = c("lon","lat")
+
+cluster_centroids = data.frame()
+
+for (i in 1:7){
+  point = a  %>% filter(Cluster == i) %>% summarize(test = st_combine(centroid)) %>% 
+  st_sf() %>% st_centroid_within_poly() %>% st_coordinates(x.test)
+  
+  colnames(point) = c("lon","lat")
+
+  cluster_centroids = rbind(cluster_centroids,point)
+}
+
+cluster_id = c(1:7)
+cluster_centroids = cbind(cluster_centroids,cluster_id)
+
+CA_sf$Cluster = as.factor(CA_sf$Cluster)
+
+ggplot() +
+  geom_sf(data = CA_sf, aes(fill = Cluster), color = "black") +
+    scale_fill_brewer(palette="Set1") + theme_void()
+
+# ggplot() +
+#   geom_sf(data = CA_sf, aes(fill = Cluster), color = "black") +
+#   geom_point(data = cluster_centroids, aes(x = lon, y = lat)) +
+#    scale_fill_brewer(palette="Set1") + theme_void()
+```
+
+Plot edges of graph between centroids
+
+```{r}
+edges = data.frame(from = rep(1:num_clus, each = num_clus), 
+                   to = rep(1:num_clus, num_clus), weight = c(huge.est))
+edges = edges %>% filter(weight == 1)
+```
+
+
+```{r}
+edges_df = matrix(0,nrow = nrow(edges),ncol=4)
+
+for(i in 1:nrow(edges_df)){
+  lat_from = cluster_centroids$lat[edges$from[i]]
+  lat_to = cluster_centroids$lat[edges$to[i]]
+  
+  lon_from = cluster_centroids$lon[edges$from[i]]
+  lon_to = cluster_centroids$lon[edges$to[i]]
+  
+  edges_df[i,] = cbind(lat_from,lat_to,lon_from,lon_to)
+
+}
+
+edges_df = data.frame(edges_df)
+colnames(edges_df) = c("y1","y2","x1","x2")
+
+ggplot() +
+  geom_sf(data = CA_sf, aes(fill = Cluster), color = "black") +
+  geom_point(data = cluster_centroids, aes(x = lon, y = lat)) +
+  geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), data = edges_df) +
+  scale_fill_brewer(palette="Set1") + theme_void()
+```
+
+
+
+
+
+
+```{r,eval=FALSE}
+df <- data.frame(x1 = -121.3445, x2 = -122.2345, y1 = 38.44905, y2 = 40.12611)
+
+ggplot() +
+  geom_sf(data = CA_sf, aes(fill = Cluster), color = "black") +
+  geom_point(data = cluster_centroids, aes(x = lon, y = lat)) +
+  geom_curve(aes(x = x1, y = y1, xend = x2, yend = y2, colour = "segment"), data = df)
+```
+
+
+
