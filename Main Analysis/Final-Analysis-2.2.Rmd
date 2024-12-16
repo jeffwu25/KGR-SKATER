@@ -2883,11 +2883,11 @@ GLMM with type 0 generic specification (known covariance matrix)
 kgr_model2 = function(dataset, rho_EPA_rbf = 1, rho_EPA_periodic = 1, sigma2_EPA = 1,link=1){
   
   #Calculate gram matrix K_EPA
-  K_EPA2 = EPA_kernel2(time_span = length(unique(dataset$time)),
+  K_EPA = EPA_kernel(time_span = length(unique(dataset$time)),
                      rho_rbf = rho_EPA_rbf, rho_periodic = rho_EPA_periodic, sigma2 = sigma2_EPA)
   
   #Heatmap of resulting K 
-  K_EPA_heatmap2 = matrix_heatmap(K_EPA2,title = "K_EPA Heatmap")
+  K_EPA_heatmap = matrix_heatmap(K_EPA,title = "K_EPA Heatmap")
   
   #Calculate trace norm of gram matrix
   K_EPA_weight = norm((1/60)*K_EPA,type = "F")
