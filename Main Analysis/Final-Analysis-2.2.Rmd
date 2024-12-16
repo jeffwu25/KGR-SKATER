@@ -1,15 +1,17 @@
 ---
-title: "INLA-Mortality-7.2"
+title: "INLA-2.2-Final"
 author: "Jeffrey Wu"
-date: "2024-06-25"
+date: "2024-06-17"
 output: html_document
 ---
+
+Silhouette plots suggest optimal number of clusters is 2 so let's see what results look like with only two clusters: 
 
 ### Steps of my analysis
 
 Load all relevant packages:
 
-```{r,warning=FALSE,echo=FALSE}
+```{r,warning=FALSE,echo=TRUE,results='hide'}
 library(dplyr) 
 library(tidyverse)
 library(lubridate)
@@ -34,19 +36,16 @@ library(urbnmapr)
 library(RAQSAPI)
 library(con2aqi)
 library(pscl)
-library(reshape2)
 library(corrplot)
-library(superheat)
+library(igraph)
 library(shapes)
 library(scales)
-library(kableExtra)
 ```
 
 Loading and (quickly cleaning) all necessary datasets:
 
 ```{r,message=FALSE,cache=TRUE,collapse=TRUE}
 ###SoA data
-
 soa.data = read_xlsx("SoA.data.1019.xlsx")
 
 ###county_flips are unique identifier for counties
@@ -70,20 +69,6 @@ CA_data = soa_joint %>% select(long, lat, county_name.y, Year, Score, Total_Pop,
                                Median_Gross_Rent, Housing_No_Telephone,
                                Housing_Incomplete_Plumbing)
 
-### Quick descriptions of SoA data variables
-# Score: social deprivation index (SDI) score calculated from the following 11 subindices
-# EDUC_Lessthan9: % of population older than 24 with less than 9 years of education
-# EDUC_college: % of population older than 24 with at least four years of college education
-# White_Collar: % of population older than 15 employed in a white collar occupation
-# Unemployment_Rate: unemployment rate for population older than 15
-# Adj_HH_income: median household income adjusted for local housing costs
-# Income_Disparity: an income disparity ratio
-# Individuals_Below_Poverty: % of population below the federal poverty line
-# Median_Home_Value: median home value for owned, occupied units
-# Median_Gross_Rent: median gross rent for rented units
-# Housing_No_Telephone: % of households without a telephone
-# Housing_Incomplete_Plumbing: % of households with incomplete plumbing
-
 colnames(CA_data)[3] = "County"
 
 CA_newdata = soa.data[1:58,]
@@ -97,6 +82,20 @@ mortality = mortality[,-c(1,4,9)]
 Population = rep(100000,nrow(mortality))
 mortality = cbind(mortality,Population)
 ```
+Quick descriptions of SoA data variables:
+
+Score: social deprivation index (SDI) score calculated from the following 11 subindices
+EDUC_Lessthan9: % of population older than 24 with less than 9 years of education
+EDUC_college: % of population older than 24 with at least four years of college education
+White_Collar: % of population older than 15 employed in a white collar occupation
+Unemployment_Rate: unemployment rate for population older than 15
+Adj_HH_income: median household income adjusted for local housing costs
+Income_Disparity: an income disparity ratio
+Individuals_Below_Poverty: % of population below the federal poverty line
+Median_Home_Value: median home value for owned, occupied units
+Median_Gross_Rent: median gross rent for rented units
+Housing_No_Telephone: % of households without a telephone
+Housing_Incomplete_Plumbing: % of households with incomplete plumbing
 
 # Heatmap of population by county
 
@@ -130,9 +129,6 @@ print(gg_pop)
 California state with county labels for reference:
 
 ![](images/CA_counties.png)
-
-![](images/CA_counties.png)
-
 
 ## SKATER clustering
 
@@ -169,7 +165,7 @@ covariates_scale = data.frame(t(score_scaled))
 CA_spdf@data = covariates_scale
 ```
 
-Using the SPDF from above, we follow the steps of SKATER tutorial (https://www.dshkol.com/post/spatially-constrained-clustering-and-regionalization/) to generate three separate clustering results: (1) Unconstrained/default (2) Clusters have minimum population constraint based on the total population / \# of clusters (3) Clusters are comprised of a minimum number of counties (8 for smaller number of clusters, 4 for bigger numbers)
+Using the SPDF from above, we follow the steps of SKATER tutorial (<https://www.dshkol.com/post/spatially-constrained-clustering-and-regionalization/>) to generate three separate clustering results: (1) Unconstrained/default (2) Clusters have minimum population constraint based on the total population / \# of clusters (3) Clusters are comprised of a minimum number of counties (8 for smaller number of clusters, 4 for bigger numbers)
 
 ```{r}
 #Identify neighborhood list for counties 
@@ -202,48 +198,46 @@ ct_mst <- mstree(ct_w)
 plot(ct_mst,coordinates(CA_spdf),col="blue", cex.lab=0.5)
 plot(CA_spdf, add=TRUE)
 
-#Run SKATER algorithm to get 7 contiguous clusters (cluster idx is in order of CA_sf)
-clus7 <- skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 6)
+#Run SKATER algorithm to get 5 contiguous clusters (cluster idx is in order of CA_sf)
+clus2 <- skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 1)
 
 #Determine an appropriate minimum population threshold based on???
 pops_summary = summary(unique(CA_data$Total_Pop))
 pops_summary
 
 #Idea 1: Use median * (how many counties should be in a cluster at minimum)
-min_pop = as.numeric(pops_summary[3] * 4)
+min_pop = as.numeric(pops_summary[3] * 5)
 
 #Idea 2: If we assume CA population is 39M, divide total pop by # clusters
-min_pop2 = 39000000 / 7
+min_pop2 = 39000000 / 2
 
 #Add a min population constraint
-clus7_min <- skater(edges = ct_mst[,1:2], 
+clus2_min <- skater(edges = ct_mst[,1:2], 
                      data = covariates_scale, 
-                     crit = 5000000, 
+                     crit = min_pop2, 
                      vec.crit = CA_data$Total_Pop,
-                     ncuts = 6)
+                     ncuts = 1)
 
 #Add a minimum number of areas in each cluster constraint 
-clus7_minarea = skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 6, 4)
+clus2_minarea = skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 1,4)
 
 
-CA_data_cluster = (CA_sf %>% mutate(clus = clus7_min$groups))
+CA_data_cluster = (CA_sf %>% mutate(clus = clus2_min$groups))
 
 #Plot clustered CA
-plot((CA_sf %>% mutate(clus = clus7$groups))['clus'], main = "7 cluster example")
+plot((CA_sf %>% mutate(clus = clus2$groups))['clus'], main = "2 cluster example")
 
-plot((CA_sf %>% mutate(clus = clus7_min$groups))['clus'], main = "7 cluster example with population constraint")
+plot((CA_sf %>% mutate(clus = clus2_min$groups))['clus'], main = "2 cluster example with population constraint")
 
-plot((CA_sf %>% mutate(clus = clus7_minarea$groups))['clus'], main = "7 cluster example with minimum number of areas constraint")
+plot((CA_sf %>% mutate(clus = clus2_minarea$groups))['clus'], main = "2 cluster example with minimum number of areas constraint")
 
-
-
-#plot(CA_sf,col=c("red","green","blue","purple","yellow")[clus7_min$groups],max.plot=17)
+#plot(CA_sf,col=c("red","green","blue","purple","yellow")[clus2_min$groups],max.plot=17)
 ```
 
 For reference, here are the cluster labels for each county: 
 
 ```{r}
-clusterlabels = data.frame(CA_data_cluster$NAME,clus7_min$groups)
+clusterlabels = data.frame(CA_data_cluster$NAME,clus2_min$groups)
 names(clusterlabels) = c("counties","Cluster")
 
 o = order(clusterlabels$counties)
@@ -252,20 +246,18 @@ rownames(clusterlabels) = NULL
 
 clusterlabels
 counties = clusterlabels$counties
-num_clus = max(clus7_min$groups)
+num_clus = max(clusterlabels$Cluster)
 ```
 
 ## HUGE graph estimation
 
-This code chunk takes the cluster grouping from SKATER and aggregates the full dataframe from the SPDF (58x10) into a 10x8 matrix (10 time points x 8 clusters) to be fed into the graph estimation package HUGE. The data from each county in a given cluster is aggregated based on a population weighted mean.
+This code chunk takes the cluster grouping from SKATER and aggregates the full dataframe from the SPDF (58x10) into a 10x2 matrix (10 time points x 2 clusters) to be fed into the graph estimation package HUGE. The data from each county in a given cluster is aggregated based on a population weighted mean.
 
 HUGE uses glasso to estimate a graph structure based on the aggregated feature data which recall, is the SDI score (socioeconomic status) from the SoA. We use a grid of lambda values under 1 in order to ensure that some edges will be present in the estimates produced by HUGE. This decision is supported by the fact that partial correlations calculated via regression appear to be statistically significant. Based on simulation results, we believe that EBIC is a suitable criterion for choosing the best estimated graph in the huge.select() step.
 
-The objective function for EBIC is as follows: $EBIC_{\gamma}(s) = -2log L_n \{ \hat \theta(s) \} + \nu(s) log n + 2 \gamma log \tau(S_j)$ where $0 \leq \gamma \leq 1$ and $S_j$ is model space of size $\tau(S_j)$
-
 ```{r,cache = FALSE}
 #Aggregate feature vectors into one vector for each SKATER cluster
-CA_cluster = data.frame(CA_sf$NAMELSAD,clus7_min$groups)
+CA_cluster = data.frame(CA_sf$NAMELSAD,clus2_min$groups)
 names(CA_cluster) = c("County","Cluster")
 year = 2010:2019
 
@@ -273,9 +265,9 @@ CA_cluster = left_join(CA_cluster,CA_data,by = "County")
 
 #Get weighted avg value for Score for each cluster for each year 
 #Create new data matrix of aggregated feature vectors 
-cluster_features = matrix(NA,nrow = 10,ncol = 7)
+cluster_features = matrix(NA,nrow = 10,ncol = num_clus)
 
-for (i in 1:7){
+for (i in 1:num_clus){
   cluster = CA_cluster %>% filter(Cluster == i)
 
   for(j in 1:10){
@@ -301,23 +293,23 @@ plot(glasso.ebic)
 huge.est = glasso.ebic$refit
 huge.est
 
+#Identify which clusters/nodes are the most connected on the graph i.e. has the most association with the other nodes 
 degree_connectivity = data.frame(colSums(huge.est))
 colnames(degree_connectivity) = "node_connections"
 degree_connectivity = cbind(c(1:num_clus),degree_connectivity)
 ```
+
 ## Plotting HUGE graph
 
 ```{r,eval=FALSE}
-install.packages("igraph")
-library(igraph)
 # Convert the adjacency matrix to a graph object
 g <- graph_from_adjacency_matrix(huge.est, mode = "undirected")
 
 # Assign custom labels to vertices
-V(g)$name <- c(1,2,3,4,5,6,7)
+V(g)$name <- c(1,2)
 
 # Assign colors to vertices
-V(g)$color <- c("red", "cyan", "green", "yellow", "purple", "orange", "pink")
+V(g)$color <- c("red", "cyan")
 
 # Plot the graph with labeled vertices
 plot(g, vertex.label = V(g)$name, vertex.color = V(g)$color, vertex.size = 20)
@@ -325,7 +317,7 @@ plot(g, vertex.label = V(g)$name, vertex.color = V(g)$color, vertex.size = 20)
 
 ## Transforming estimated adjacency matrix to graph filter H
 
-The code below takes the adjacency matrix estimated in the previous step and transforms it into a graph filter H. The steps are explained in Antonian et al (Gareth's paper). The cutoff transformation is used for the eigenvalues.
+The code below takes the adjacency matrix estimated in the previous step and transforms it into a graph filter H. The steps are explained in Antonian et al 2019 (Gareth Peters' paper). The cutoff transformation is applied to the eigenvalues of the graph Laplacian.
 
 ```{r}
 A = as.matrix(huge.est)
@@ -373,13 +365,12 @@ H = U %*% eta.L %*% t(U)
 H
 
 gfilter_weight = norm((1/7)*H^2,type = "F")
-# gfilter_weight = norm(H^2,type = "F")
 ```
 
 # Create a function to generate heatmap plots of matrices
 
 ```{r}
-matrix_heatmap= function(matrix,title = "",gradient_zones = c(0,0.8,0.999)){
+matrix_heatmap= function(matrix,title = "",gradient_zones = c(0,0.5,0.999)){
   r = nrow(matrix)
   df = as_tibble(cbind(expand.grid(rev(seq_len(r)),seq_len(r)),c(matrix))) %>% setNames(c("row","col","value"))
   df$value[df$value == 1] = 0.999
@@ -392,6 +383,7 @@ matrix_heatmap= function(matrix,title = "",gradient_zones = c(0,0.8,0.999)){
   return(plot)
 }
 ```
+
 
 # Heatmap plot of graph filter
 
@@ -431,14 +423,13 @@ counties_url = "https://aqs.epa.gov/data/api/list/countiesByState?email=jeffreyw
 countycodes = fromJSON(counties_url)
 countycodes = countycodes[[2]]
 california_counties = countycodes$code
+counties = countycodes$value_represented 
 
 #Get parameter codes
 parameters_url = "https://aqs.epa.gov/data/api/list/parametersByClass?email=jeffreywu@ucsb.edu&key=copperheron86&pc=CRITERIA"
 
 parametercodes = fromJSON(parameters_url)
 parametercodes = parametercodes[[2]]
-
-#Do we want to keep Lead PM10 or delete
 parametercodes = parametercodes[-7,]
 
 pollutants = data.frame(parametercodes$code)
@@ -921,7 +912,7 @@ pollutants2_2019 = aqs_dailysummary_by_site(parameter = c("44201","81102","88101
 saveRDS(pollutants2_2019,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/EPA data/Raw/pollutants2_2019_8.18.RData")
 ```
 
-After querying the raw data for each pollutant and each year, we want to go through it and remove any data from stations that have "bad" data. The standards that I set (for now) are that for a given year, a station should have at least 240 of the 365 days included for a year of data. Additionally, I applied a Hampel filter to identify outliers and if there are more than 14 consecutive outliers in the data i.e., days in a row with measurements that are abnormal, I considered the data from that station to not be suitable for inclusion in the final dataset.
+After querying the raw data for each pollutant and each year, we want to go through it and remove any data from stations that have "bad" data. The standards that I set are that for a given year, a station should have at least 240 of the 365 days included for a year of data. Additionally, I applied a Hampel filter to identify outliers and if there are more than 14 consecutive outliers in the data i.e., days in a row with measurements that are abnormal, I considered the data from that station to not be suitable for inclusion in the final dataset.
 
 NOTE: the daily values reported in the raw dataset are actually daily averages from periodic measurements made by the station throughout the day
 
@@ -1224,7 +1215,7 @@ head(final_EPA_data)
 
 # Adding cluster labels to the EPA data and aggregating based on clusters
 
-Once the EPA data is in the correct format (one big dataframe) at the county level, we now need to aggregate it to the cluster level according to the SKATER cluster labels from before. A population weighted mean was used to aggregate here as well, MAY OR MAY NOT BE APPROPRIATE?
+Once the EPA data is in the correct format (one big dataframe) at the county level, we now need to aggregate it to the cluster level according to the SKATER cluster labels from before. A population weighted mean was used to aggregate here as well
 
 ```{r}
 Cluster = rep(1,length(final_EPA_data))
@@ -1248,7 +1239,6 @@ countypops = cbind(countypops,Cluster = rep(clusterlabels$Cluster,each=6))
 countypops$County = rep(counties,each=6)
 
 temp_EPA_agg_data = data.frame(final_EPA_agg_data[1,-2])
-num_clus = length(unique(clusterlabels$Cluster))
 
 for (k in 1:num_clus){
   
@@ -1369,6 +1359,8 @@ for (k in 1:num_clus){
 
 # Building covariate matrices to be used for gram matrix calculations
 
+The kernel structures presented below reflect the findings of Chen et al. (2019) that distributed lags and interaction effects should be considered when evaluating the effects of air pollutants. Additionally, we wanted these lagged and joint effects to also vary in time. So, instead of calculating true autoregressive (AR), distributed lag (DL), and interaction structures, which assume stationarity, we construct localized kernels which have dynamic localized conditional correlations through time.
+
 ```{r}
 EPA_cluster_list = list()
 
@@ -1389,6 +1381,8 @@ for (i in 1:num_clus){
   EPA_cluster_list[[i]] = cluster_EPA_data(i)
 }
 ```
+
+The first step is to decompose our covariate time series into its trend, seasonal, and residual components because we want to learn each kernel on a different component. 
 
 ```{r}
 decompose_ts = function(EPA_ts){
@@ -1474,57 +1468,21 @@ decompose_ts = function(EPA_ts){
 
 decompose_clus1 = decompose_ts(EPA_cluster_list[[1]])
 decompose_clus2 = decompose_ts(EPA_cluster_list[[2]])
-decompose_clus3 = decompose_ts(EPA_cluster_list[[3]])
-decompose_clus4 = decompose_ts(EPA_cluster_list[[4]])
-decompose_clus5 = decompose_ts(EPA_cluster_list[[5]])
-decompose_clus6 = decompose_ts(EPA_cluster_list[[6]])
-decompose_clus7 = decompose_ts(EPA_cluster_list[[7]])
 
-decomposed_cluster_data = list(decompose_clus1,decompose_clus2,decompose_clus3,
-                            decompose_clus4,decompose_clus5,decompose_clus6,
-                            decompose_clus7)
+decomposed_cluster_data = list(decompose_clus1,decompose_clus2)
 
-S_random_all = cbind(decompose_clus1$S_random,decompose_clus2$S_random,
-                     decompose_clus3$S_random,decompose_clus4$S_random,
-                     decompose_clus5$S_random,decompose_clus6$S_random,
-                     decompose_clus7$S_random)
+S_random_all = cbind(decompose_clus1$S_random,decompose_clus2$S_random)
 
-S_DL_all = cbind(cbind(decompose_clus1$S_DL,decompose_clus2$S_DL,
-                     decompose_clus3$S_DL,decompose_clus4$S_DL,
-                     decompose_clus5$S_DL,decompose_clus6$S_DL,
-                     decompose_clus7$S_DL))
+S_DL_all = cbind(decompose_clus1$S_DL,decompose_clus2$S_DL)
 
-W2_all = cbind(cbind(decompose_clus1$W2,decompose_clus2$W2,
-                     decompose_clus3$W2,decompose_clus4$W2,
-                     decompose_clus5$W2,decompose_clus6$W2,
-                     decompose_clus7$W2))
+W2_all = cbind(decompose_clus1$W2,decompose_clus2$W2)
 ```
 
-Power spectral density analysis to identify weights of significant lags : 
+## Calculating autoregressive structure
 
-```{r,eval=FALSE}
-library(psd)
+Using the residual component of each time series, we construct a kernel that calculates the autocorrelation at one lag for all time points
 
-S_psd = pspectrum(decompose_clus1$S_DL,plot=TRUE)
-freq = 10^(S_psd$freq)
-plot(S_psd$spec[,8]~S_psd$freq,xlab="frequency",ylab="spectral density",type = "l")
-
-
-
-top5_peaks = sort(abs(S_psd$spec),decreasing = TRUE)[1:5]
-top5_freqs = S_psd$freq[which(abs(S_psd$spec) == 0.4173804)]
-
-spec_decomp = spectrum(S_seasonal)
-# spec_decomp$spec
-```
-
-```{r,eval=FALSE}
-test.spec = spectrum(decompose_clus1$S_DL,span=3,log="no",plot=TRUE)
-plot(test.spec$spec[,8]~test.spec$freq,xlab="frequency",ylab="spectral density",type = "l")
-dom.freq=test.spec$freq[which.max(test.spec$spec[,8])]
-```
-
-## Calculating autoregressive structure (linear time invariant approach)
+Linear time invariant approach:
 
 Let $\sigma^2_{AR} = \gamma(0)$ be the variance of one of our time series, we can find ACVF and ACF from Yule-Walker as 
 
@@ -1565,11 +1523,9 @@ for (c in 1:num_clus){
   AR_invariant[row(AR_invariant) == col(AR_invariant) - 1] = (1/length(ar.cov.values))*sum(ar.cov.values)
   AR_invariant[row(AR_invariant) == col(AR_invariant) + 1] = (1/length(ar.cov.values))*sum(ar.cov.values)
   
-  # corrplot(AR_invariant, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-  #          title = "Invariant AR 1 Covariance Structure")
+  # corrplot(AR_invariant, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Invariant AR 1 Covariance Structure")
   
   matrix_heatmap(AR_invariant,title = "Invariant AR 1 Covariance Structure")
-
   
   AR_invariant_list[[c]] = AR_invariant
 }
@@ -1580,10 +1536,10 @@ for(i in 1:num_clus){
   K_AR_invariant = K_AR_invariant + ((1/num_clus)*AR_invariant_list[[i]])
 }
 
-# corrplot(K_AR_invariant, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-#            title = "Invariant AR 1 Covariance Structure")
+# corrplot(K_AR_invariant, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Invariant AR 1 Covariance Structure")
 
 matrix_heatmap(K_AR_invariant,title = "Invariant AR 1 Covariance Structure")
+
 ```
 
 
@@ -1621,7 +1577,7 @@ for (c in 1:num_clus){
                                / (2*rho_AR)) * sigma2_AR
           
           K_covariate_periodic[j,k] = exp(- ((ts[j] - ts[k])^2) #Locally periodic kernel 
-                       / (2*rho_AR)) * exp(- (2*sin((abs(ts[j] - ts[k]))*pi/12)^2)
+                       / (2*rho_AR)) * exp(- (2*sin((abs(ts[j] - ts[k]))*3.14/12)^2)
                        / (rho_AR)) * sigma2_AR
         }
         else{
@@ -1642,17 +1598,10 @@ for (c in 1:num_clus){
   K_AR = matrix(0,nrow=60,ncol=60)
   K_AR_periodic = matrix(0,nrow=60,ncol=60)
   
-  K_AR_periodic_weights = rep(1,length(K_AR_periodic_list))
-  
   for(i in 1:length(K_AR_periodic_list)){
     K_AR = K_AR + ((1/8)*K_AR_list[[i]])
     K_AR_periodic = K_AR_periodic + ((1/8)*K_AR_periodic_list[[i]])
-    
-    K_AR_periodic_weights[i] = norm(K_AR_periodic_list[[i]],type = "F")
   }
-  
-  K_AR_periodic_weights = K_AR_periodic_weights / sum(K_AR_periodic_weights)
-  print(K_AR_periodic_weights)
   
   K_AR_cluster[[c]] = K_AR
   K_AR_periodic_cluster[[c]] = K_AR_periodic
@@ -1663,14 +1612,18 @@ for (c in 1:num_clus){
 for (i in 1:num_clus){
   title1 = sprintf("AR 1 Covariance for Cluster %s",i)
   title2 = sprintf("Periodic AR 1 Covariance for Cluster %s",i)
+  # melted_covmat <- melt(K_AR_periodic_list[[i]])
+  # K_AR_periodic_heatmap = ggplot(data = melted_covmat, aes(x=Var1, y=Var2, fill=value)) +
+  # geom_tile() + ggtitle(title)
+  # 
+  # print(K_AR_periodic_heatmap)
   
-  # corrplot(K_AR_cluster[[i]], order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-  #        title = title1)
-  # corrplot(K_AR_periodic_cluster[[i]], order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-  #        title = title2)
+  # corrplot(K_AR_cluster[[i]], is.corr = FALSE, method = 'color', tl.cex = 0.5, title = title1)
+  # corrplot(K_AR_periodic_cluster[[i]], is.corr = FALSE, method = 'color', tl.cex = 0.5, title = title2)
   
   matrix_heatmap(K_AR_cluster[[i]],title = title1)
   matrix_heatmap(K_AR_periodic_cluster[[i]],title = title2)
+
 }
 ```
 
@@ -1680,30 +1633,28 @@ Combine each cluster's AR 1 kernel together:
 K_AR = matrix(0,nrow=60,ncol=60)
 K_AR_periodic = matrix(0,nrow=60,ncol=60)
 
-K_AR_periodic_weights = rep(1,num_clus)
-
 for(i in 1:num_clus){
   K_AR = K_AR + ((1/num_clus)*K_AR_cluster[[i]])
   K_AR_periodic = K_AR_periodic + ((1/num_clus)*K_AR_periodic_cluster[[i]])
-  
-  K_AR_periodic_weights[i] = norm(K_AR_cluster[[i]],type = "F")
 }
 
-K_AR_periodic_weights = K_AR_periodic_weights / sum(K_AR_periodic_weights)
-
-print(K_AR_periodic_weights)
-
 #Heatmap of resulting K 
-# corrplot(K_AR, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-#        title = "AR 1 Covariance Structure")
-# corrplot(K_AR_periodic, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-#        title = "Periodic AR 1 Covariance Structure")
+# melted_covmat <- melt(t(K_AR_periodic))
+# K_AR_periodic_heatmap = ggplot(data = melted_covmat, aes(x=Var1, y=Var2, fill=value)) + 
+#   geom_tile() + ggtitle("AR 1 Covariance Structure")
+# 
+# K_AR_periodic_heatmap
+
+# corrplot(K_AR, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "AR 1 Covariance Structure")
+# corrplot(K_AR_periodic, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Periodic AR 1 Covariance Structure")
 
 matrix_heatmap(K_AR,title = "AR 1 Covariance Structure")
 matrix_heatmap(K_AR_periodic,title = "Periodic AR 1 Covariance Structure")
 ```
 
 ## Calculating distributed lag structure
+
+Here, we wish to account for lagged effects that we believe are significant (3,6, and 12 months). Note that we add the seasonal component to the residual component of our covariate time series decomposition to get our input for this kernel.
 
 ```{r,warning=FALSE}
 DL_invariant_list = list()
@@ -1770,8 +1721,10 @@ for (c in 1:num_clus){
   #   DL_invariant_covmatrix[row(DL_invariant_covmatrix) == col(DL_invariant_covmatrix) + 12] = dl12.cov.values[j]
   #   
   #   # title = sprintf("Covariance of %s",colnames(S_DL_all)[j])
-  #   # corrplot(DL_invariant_covmatrix, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-  #   #      title = title)
+  #   # corrplot(DL_invariant_covmatrix, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = title)
+  
+  #   # matrix_heatmap(DL_invariant_covmatrix,title = title)
+
   # }
   
   DL_invariant_covmatrix = diag(nrow(S_DL_clus))
@@ -1787,10 +1740,7 @@ for (c in 1:num_clus){
   
   DL_invariant_list[[c]] = DL_invariant_covmatrix
   
-  # corrplot(DL_invariant_covmatrix, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-  #   title = "Invariant DL (3,6,12) Covariance Structure")
-  
-  matrix_heatmap(DL_invariant_covmatrix,title = "Invariant DL (3,6,12) Covariance Structure")
+  corrplot(DL_invariant_covmatrix, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Invariant DL (3,6,12) Covariance Structure")
 }
 
 #Combine DL covariance matrices from each cluster together
@@ -1800,10 +1750,8 @@ for(i in 1:num_clus){
   K_DL_invariant = K_DL_invariant + ((1/num_clus)*DL_invariant_list[[i]])
 }
 
-# corrplot(K_DL_invariant, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-#   title = "Invariant DL (3,6,12) Covariance Structure")
-
-matrix_heatmap(K_DL_invariant,title = "Invariant DL (3,6,12) Covariance Structure")
+# corrplot(K_DL_invariant, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Invariant DL(3,6,12) Covariance Structure")
+matrix_heatmap(K_DL_invariant,title = "Invariant DL(3,6,12) Covariance Structure")
 ```
 
 ```{r}
@@ -1840,7 +1788,7 @@ for (c in 1:num_clus){
           K_DL[j,k] = exp(- (sum(S_DL_clus[j,] - S_DL_clus[k,])^2) / (2*rho_DL)) * sigma2_DL
           
           K_DL_periodic[j,k] = exp(- (sum(S_DL_clus[j,] - S_DL_clus[k,])^2)
-                               / (2*rho_DL)) * exp(- (2*sin(sum(abs(S_DL_clus[j,] - S_DL_clus[k,]))*pi/12)^2)
+                               / (2*rho_DL)) * exp(- (2*sin(sum(abs(S_DL_clus[j,] - S_DL_clus[k,]))*3.14/12)^2)
                                / (rho_DL)) * sigma2_DL
           
         } 
@@ -1860,17 +1808,10 @@ for (c in 1:num_clus){
   K_DL = matrix(0,nrow=time_span,ncol=time_span)
   K_DL_periodic = matrix(0,nrow=time_span,ncol=time_span)
   
-  K_DL_periodic_weights = rep(1,length(K_DL_periodic_list))
-  
   for(i in 1:length(K_DL_periodic_list)){
     K_DL = K_DL + ((1/3)*K_DL_list[[i]])
     K_DL_periodic = K_DL_periodic + ((1/3)*K_DL_periodic_list[[i]])
-    
-    K_DL_periodic_weights[i] = norm(K_DL_periodic_list[[i]],type = "F")
   }
-  
-  K_DL_periodic_weights = K_DL_periodic_weights / sum(K_DL_periodic_weights)
-  print(K_DL_periodic_weights)
   
   #Store DL(3,6,12) covariance matrix for each cluster 
   K_DL_cluster[[c]] = K_DL
@@ -1884,29 +1825,28 @@ Combining DL kernels for each cluster together:
 K_DL = matrix(0,nrow=time_span,ncol=time_span)
 K_DL_periodic = matrix(0,nrow=time_span,ncol=time_span)
 
-K_DL_periodic_weights = rep(1,num_clus)
-
 for(i in 1:num_clus){
   K_DL = K_DL + ((1/num_clus)*K_DL_cluster[[i]])
   K_DL_periodic = K_DL_periodic + ((1/num_clus)*K_DL_periodic_cluster[[i]])
-  
-  K_DL_periodic_weights[i] = norm(K_DL_periodic_cluster[[i]],type = "F")
 }
 
-K_DL_periodic_weights = K_DL_periodic_weights / sum(K_DL_periodic_weights)
-print(K_DL_periodic_weights)
-
 #Heatmap of resulting K 
-# corrplot(K_DL, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-#   title = "DL (3,6,12) Covariance Structure")
-# corrplot(K_DL_periodic, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-#   title = "Periodic DL (3,6,12) Covariance Structure")
+# melted_covmat <- melt(K_DL_periodic)
+# K_DL_periodic_heatmap = ggplot(data = melted_covmat, aes(x=Var1, y=Var2, fill=value)) + 
+#   geom_tile() + ggtitle("Distributed Lag (3,6,12) Covariance Structure")
+# 
+# K_DL_periodic_heatmap
+
+# corrplot(K_DL, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "DL (3,6,12) Covariance Structure")
+# corrplot(K_DL_periodic, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Periodic DL (3,6,12) Covariance Structure")
 
 matrix_heatmap(K_DL,title = "DL (3,6,12) Covariance Structure")
 matrix_heatmap(K_DL_periodic,title = "Periodic DL (3,6,12) Covariance Structure")
 ```
 
 ## Calculating interaction structure 
+
+Finally, we want to include the two way interaction structures for every pair of EPA covariate time series. It is reasonable to think that the value of an air pollutant covariate at one time point may affect the value of another air pollutant at the same or even future time point. Interaction pairs are calculated by performing the kronecker product on two of time series vectors.
 
 ```{r}
 K_Interaction_cluster = list()
@@ -1954,11 +1894,11 @@ for (c in 1:num_clus){
         
         #Locally periodic kernels 
         K_int0_periodic[i,j] = exp(- ((interaction[lag0_idx[i]] - interaction[lag0_idx[j]])^2)
-                         / (2*rho_int)) * exp(- (2*sin((abs(interaction[lag0_idx[i]] - interaction[lag0_idx[j]]))*pi/12)^2)
+                         / (2*rho_int)) * exp(- (2*sin((abs(interaction[lag0_idx[i]] - interaction[lag0_idx[j]]))*3.14/12)^2)
                          / (rho_int)) * sigma2_int
             
         K_int1_periodic[i,j] = exp(- ((interaction[lag1_idx[i]] - interaction[lag1_idx[j]])^2)
-                             / (2*rho_int)) * exp(- (2*sin((abs(interaction[lag1_idx[i]] - interaction[lag1_idx[j]]))*pi/12)^2)
+                             / (2*rho_int)) * exp(- (2*sin((abs(interaction[lag1_idx[i]] - interaction[lag1_idx[j]]))*3.14/12)^2)
                              / (rho_int)) * sigma2_int
       }
     }
@@ -1975,23 +1915,14 @@ for (c in 1:num_clus){
   K_interaction = matrix(0,nrow=60,ncol=60)
   K_interaction_periodic = matrix(0,nrow=60,ncol=60)
   
-  K_interaction_periodic_weights = rep(1,length(K_interaction_periodic_list))
-  
   for(i in 1:length(K_interaction_periodic_list)){
     K_interaction = K_interaction + ((1/length(K_interaction_list))*K_interaction_list[[i]])
     
     K_interaction_periodic = K_interaction_periodic + ((1/length(K_interaction_periodic_list))*K_interaction_periodic_list[[i]])
-    
-    K_interaction_periodic_weights[i] = norm(K_interaction_periodic_list[[i]],type = "F")
   }
   
-  K_interaction_periodic_weights = K_interaction_periodic_weights / sum(K_interaction_periodic_weights)
-  print(K_interaction_periodic_weights)
-  
-  # corrplot(K_interaction, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-  # title = "Interaction Covariance Structure")
-  # corrplot(K_interaction_periodic, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-  # title = "Periodic Interaction Covariance Structure")
+  # corrplot(K_interaction, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Interaction Covariance Structure")
+  # corrplot(K_interaction_periodic, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Periodic Interaction Covariance Structure")
   
   matrix_heatmap(K_interaction,title = "Interaction Covariance Structure")
   matrix_heatmap(K_interaction_periodic,title = "Periodic Interaction Covariance Structure")
@@ -2009,23 +1940,14 @@ Combining interaction kernels from each cluster together:
 K_interaction = matrix(0,nrow=60,ncol=60)
 K_interaction_periodic = matrix(0,nrow=60,ncol=60)
 
-K_interaction_periodic_weights = rep(1,num_clus)
-
 for(i in 1:num_clus){
   K_interaction = K_interaction + ((1/length(K_Interaction_cluster))*K_Interaction_cluster[[i]])
   
   K_interaction_periodic = K_interaction_periodic + ((1/length(K_Interaction_periodic_cluster))*K_Interaction_periodic_cluster[[i]])
-  
-  K_interaction_periodic_weights[i] = norm(K_Interaction_periodic_cluster[[i]],type = "F")
 }
 
-K_interaction_periodic_weights = K_interaction_periodic_weights / sum(K_interaction_periodic_weights)
-print(K_interaction_periodic_weights)
-
-# corrplot(K_interaction, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-# title = "Interaction Covariance Structure")
-# corrplot(K_interaction_periodic, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
-# title = "Periodic Interaction Covariance Structure")
+# corrplot(K_interaction, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Interaction Covariance Structure")
+# corrplot(K_interaction_periodic, is.corr = FALSE, method = 'color', tl.cex = 0.5, title = "Periodic Interaction Covariance Structure")
 
 matrix_heatmap(K_interaction,title = "Interaction Covariance Structure")
 matrix_heatmap(K_interaction_periodic,title = "Periodic Interaction Covariance Structure")
@@ -2085,59 +2007,7 @@ KTA_table
 
 In the mortality dataset obtained from Cal-ViDa, all of the cells with small values i.e., less than 10 but not equal to 0, were censored. So in order to avoid using a truncated Poisson distribution, we decided to impute these censored values with an EM algorithm which is described below:
 
-For each county and month, we assume that the number of mortality follows a Poisson distribution with rate $\lambda_i = exp(X_i \beta)$. We will estimate this rate using a Poisson regression model.
-
-Let us split the whole dataset $D$ into two sets: $W$ which denotes the set of observations that are censored and $D \backslash W$ denotes the set of observations that are not censored.
-
-For observed counts, of which there are $n_{obs}$ of, we know $P(Y_i = y_i) = \frac{\lambda_i^{y_i}e^{-\lambda_i}}{y_i!}$ for $i \in D \backslash W$ and for censored counts, of which there are $n_{cens}$ of, we do not observe $Z_i$, but we know which observations are censored i.e., the indices which are censored, and that $Z_i \in \{ 1,...,10 \}$. So we can say that $P(Z_i \in \{ 1,...,10 \}) = \sum_{j=1}^{10} \frac{\lambda_i^{j}e^{-\lambda_i}}{j!}$ for $i \in W$.
-
-**Thus, the marginal likelihood of our observed mortality data can be written as:**
-
-$L(\beta ; Y_1,...,Y_{n_{obs}},Z_{W_1},...,Z_{W_{n_{cens}}}) = \Pi_{i \in D \backslash W}^{n_{obs}} \frac{\lambda_i^{y_i}e^{-\lambda_i}}{y_i!} * \Pi_{i \in W}^{n_{cens}} \frac{ \frac{\lambda_i^{Z_i} e^{-\lambda_i}}{Z_i!}}{\sum_{j=2}^{10} \frac{\lambda_i^{j}e^{-\lambda_i}}{j!}} * \mathbf{I} \{ Z_i \in \{ 1,...,10 \} \} = \Pi_{i \in D \backslash W}^{n_{obs}} \frac{exp(X_i \beta)_i^{y_i}e^{-exp(X_i \beta)}}{y_i!} * \Pi_{i \in W}^{n_{cens}} \frac{\frac{exp(X_i \beta)^{Z_i} e^{-exp(X_i \beta)}}{Z_i!}}{\sum_{j=2}^{10} \frac{exp(X_i \beta)^{j}e^{-exp(X_i \beta)}}{j!}} * \mathbf{I} \{ Z_i \in \{ 1,...,10 \} \}$ 
-
-**OR IS IT $L(\beta ; Y_1,...,Y_{n_{obs}},Z_{W_1},...,Z_{W_{n_{cens}}}) = \Pi_{i \in D \backslash W}^{n_{obs}} \frac{\lambda_i^{y_i}e^{-\lambda_i}}{y_i!} * \Pi_{i \in W}^{n_{cens}} \sum_{j=1}^{10} (\frac{\lambda_i^{j}e^{-\lambda_i}}{j!}) = \Pi_{i \in D \backslash W}^{n_{obs}} \frac{(X_i \beta)_i^{y_i}e^{-X_i \beta}}{y_i!} * \Pi_{i \in W}^{n_{cens}} \sum_{j=1}^{10} (\frac{(X_i \beta)^{j}e^{-X_i \beta}}{j!})$**
-
-Note that we include the denominator in the truncated Poisson term in order to normalize the density, notice that this does not depend on $Z_i$. 
-
-Given the nature of this complicated marginal likelihood, we will use the EM algorithm to get maximum likelihood estimates (MLEs) of the unknown values $\beta$.
-
-The full likelihood of $\overrightarrow Y,\overrightarrow Z$ is given by:
-
-$L(\beta;\overrightarrow Y,\overrightarrow Z) = \Pi_{i \in D \backslash W}^{n_{obs}} \frac{exp(X_i \beta)_i^{y_i}e^{-exp(X_i \beta)}}{y_i!} * \Pi_{i \in W}^{n_{cens}} \frac{\frac{exp(X_i \beta)^{Z_i} e^{-exp(X_i \beta)}}{Z_i!}}{\sum_{j=2}^{10} \frac{exp(X_i \beta)^{j}e^{-exp(X_i \beta)}}{j!}} * \mathbf{I} \{ Z_i \in \{ 1,...,10 \} \}$ where $P(\overrightarrow W | \overrightarrow Z) = 1$
-
-**OR IS IT $L(\beta ; \overrightarrow Y,\overrightarrow Z) = \Pi_{i \in D \backslash W}^{n_{obs}} \frac{(X_i \beta)_i^{y_i}e^{-X_i \beta}}{y_i!} * \Pi_{i \in W}^{n_{cens}} [ \;\sum_{j=1}^{10} (\frac{(X_i \beta)^{j}e^{-X_i \beta}}{j!}) \; ] * I \{  Z_i \in \{ 1,...,10 \} \}$**
-
-The corresponding log likelihood is given by:
-
-$log \; L(\beta; \overrightarrow Y,\overrightarrow Z) = \sum_{i \in D \backslash W}^{n_{obs}} [Y_i X_i \beta - exp(X_i \beta) - log(Y_i!)] + \sum_{i \in W}^{n_{cens}} [Z_i X_i \beta - exp(X_i \beta) - log(Z_i!)] - log(\sum_{j=2}^{10} \frac{(X_i \beta)^{j}e^{-exp(X_i \beta)}}{j!})$ 
-
-**OR IS IT $log \; L(\beta; \overrightarrow Y,\overrightarrow Z) \propto \sum_{i \in D \backslash W}^{n_{obs}} [Y_i X_i \beta - exp(X_i \beta) - log(Y_i!)] + \sum_{i \in W}^{n_{cens}} [Z_i X_i \beta - exp(X_i \beta) - log(Z_i!)]$**
-
-We can exclude the denominator of the second term because it is a constant wrt $Z$
-
-In other words, $(Z_i | ,\beta^{(t)}) \sim TruncPois(exp(X_i \beta))$ for $i \in W$
-
-**E-step: Finding the expected value of the log likelihood function of** $\beta$
-
-Let $Q(\beta | \beta^{(t)}) := E_{Z \sim (. | \overrightarrow Y,\beta^{(t)})} [log \; p(\overrightarrow Y,\overrightarrow Z | \beta))]$
-
-i.e. the expected value of the log likelihood function of $\beta$, with respect to the current conditional distribution of $Z$ $p(Z | \overrightarrow Y,\beta^{(t)})$
-
-So in our case,
-
-$Q(\beta | \beta^{(t)}) = \sum_{i \in D \backslash W}^{n_{obs}} [Y_i X_i \beta - exp(X_i \beta) - log(Y_i!)] + \sum_{i \in W}^{n_{cens}} [E[Z_i | \overrightarrow W_i,\beta^{(t)})] \; X_i \beta - exp(X_i \beta) - E[log(Z_i!) | \overrightarrow W_i,\beta^{(t)}]]$
-
-**M-step: Finding the parameters that maximize** $Q(\beta | \beta^{(t)})$
-
-$\beta^{(t+1)} = arg \; max_{\beta} Q(\beta | \beta^{(t)})$
-
-So in our case, we need to maximize $Q(\beta | \beta^{(t)})$.
-
-$\beta^{(t+1)} = arg \; max_{\beta} \sum_{i \in D \backslash W}^{n_{obs}} [Y_i X_i \beta - exp(X_i \beta) - log(Y_i!)] + \sum_{i \in W}^{n_{cens}} [E[Z_i | \overrightarrow W_i,\beta^{(t)})] \; X_i \beta - exp(X_i \beta) - E[log(Z_i! ) | \overrightarrow W_i,\beta^{(t)}]]$
-
-This is equivalent to fitting a Poisson regression in which the outcomes are $Y_i$ for $i \leq n_{obs}$ and censored values $Z_i$ by $E[Z_i | \overrightarrow W,\beta^{(t)})]$ for $i \in W$.
-
-OR alternatively, we can take the first and second derivative and apply a Newton-Raphson procedure if we want to solve for $\beta$ numerically,
+Due to interval censoring, we do not observe the exact mortality counts for some units. Let $C_i$ be the censoring indicator such that $C_i = I(1 \le Y_i \le 10)$, i.e., the count is censored if it is between 1 and 10. For the EM algorithm, we will be modeling the rate using a generalized linear model where we use the variables month (our time index), cause of death, and age group as predictors. So let us assume that $\lambda_i(\beta) = \exp(\alpha_i + \textbf{X}_i^T \boldsymbol{\beta})$, where $\alpha_i$ is the offset (log of county population of the age group) and $\textbf{X}_i$ are predictors (month, cause of death, age group). Derivations for the EM algorithm can be found in appendix B of the paper.
 
 **We coded this algorithm as follows:**
 
@@ -2306,7 +2176,7 @@ logLik(final_pois_reg)
 ```
 
 
-To solve for the fixed point solutions for $\beta$ numerically, we would first take the derivative of $Q()$ wrt each $\beta_j$ which gives us
+Alternatively, we can take the first and second derivative and apply a Newton-Raphson procedure if we want to solve for $\beta$ numerically. To solve for the fixed point solutions for $\beta$ numerically, we would first take the derivative of $Q()$ wrt each $\beta_j$ which gives us:
 
 $\frac{dQ}{d\beta_j} = \sum_{i \in D \backslash W}^{n_{obs}}[y_i - exp(\alpha_i + x_i \beta)]x_{ij} + \sum_{i \in W}^N [\tilde y_i - exp(\alpha_i + x_i \beta)]x_{ij}$ where $\alpha_i$ represents the offset associated with each observation $i$ and $\tilde y_i$ represents the imputed values corresponding to censored observation $Z_i$
 
@@ -2459,7 +2329,7 @@ summary(final_pois_reg)
 
 NEWTON RAPHSON APPROACH DOES NOT WORK WELL BC AT EACH ITERATION VALUES ARE CHANGING BY TOO MUCH, LEADS TO HESSIAN MATRIX BEING UNINVERTIBLE
 
-Now that we have imputed the censored "\< 11" values in the Cal-ViDa dataset, we will now aggregate the data to get total number of respiratory related deaths for each county for every month between 2014-2019, except for Sept-Dec 2014 which are unavailable for some reason.
+Now that we have imputed the censored "\< 11" values in the Cal-ViDa dataset, we will now aggregate the data to get total number of respiratory related deaths for each county for every month between 2014-2019.
 
 # Empirical 5 number summaries for each variable of interest 
 
@@ -2478,7 +2348,6 @@ summary(AQI)
 print("Summary for SDI data")
 summary(soa.data$Score) #summary of SDI score, for all counties i.e. all of CA, all years 2010-2019
 ```
-
 
 # Reformatting the data set (mainly aggregating)
 
@@ -2635,9 +2504,7 @@ for (i in 1:num_clus){
 }
 
 #Time series of total deaths for each cluster
-colnames(cluster_mortality_total) = c("Cluster 1","Cluster 2","Cluster 3",
-                                      "Cluster 4","Cluster 5","Cluster 6",
-                                      "Cluster 7")
+colnames(cluster_mortality_total) = c("Cluster 1","Cluster 2")
 rownames(cluster_mortality_total) = colnames(total.mortality.ts[4:75])
 cluster_mortality_total = data.frame(cluster_mortality_total)
 
@@ -2645,16 +2512,11 @@ head(cluster_mortality_total)
 
 
 #Time series of rate of deaths (per 100,000) for each cluster
-colnames(cluster_mortality_rate) = c("Cluster 1","Cluster 2","Cluster 3",
-                                      "Cluster 4","Cluster 5","Cluster 6",
-                                      "Cluster 7")
+colnames(cluster_mortality_rate) = c("Cluster 1","Cluster 2")
 rownames(cluster_mortality_rate) = colnames(total.mortality.ts[4:75])
 cluster_mortality_rate = data.frame(cluster_mortality_rate)
 
 head(cluster_mortality_rate)
-
-# #Removes Sept-Dec 2014 NAs
-# cluster_mortality_total = na.omit(cluster_mortality_total)
 ```
 
 MAKE A TIME SERIES FOR EACH CLUSTER: 
@@ -2663,25 +2525,13 @@ MAKE A TIME SERIES FOR EACH CLUSTER:
 plot(ts(cluster_mortality_total$Cluster.1),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 1")
 
 plot(ts(cluster_mortality_total$Cluster.2),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 2")
-
-plot(ts(cluster_mortality_total$Cluster.3),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 3")
-
-plot(ts(cluster_mortality_total$Cluster.4),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 4")
-
-plot(ts(cluster_mortality_total$Cluster.5),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 5")
-
-plot(ts(cluster_mortality_total$Cluster.6),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 6")
-
-plot(ts(cluster_mortality_total$Cluster.7),xlab = "2014-2019 (Months)",ylab = "Respiratory related deaths", main = "Monthly population weighted means for Cluster 7")
 ```
 
 ## Fitting INLA models: spatial GLMM, Besag-York-Mollie (BYM) model, LGCPs
 
 Now that all of the data from the SoA (used for SKATER and HUGE to get graph filter H), EPA (used to get gram matrix K), and Cal-ViDa (response) is downloaded, cleaned, and well formatted, we can now fit our kernel graph regression model as well as a few reference models, which we will compare against each other. For now, I have implemented a training-test data fitting approach to evaluating model performance.
 
-First, I created a test dataset (inla_test_data) which has variables ID (which represents the cluster label), ID2 (which is basically an index label), response (cluster mortality), time (time index label 1-72), and months (month label 1-12). The response column inherently has NA values for time points 9-12 because those were not provided in the original Cal-ViDa dataset, but other than that, all observations are included. In the training dataset, I decided to hold out the last 3 months of the data (70-72 or Oct-Dec 2019) so I replaced those response values with NAs. This is how you get INLA to make predictions/forecasts because it does so based on the posterior predictive distribution.
-
-Next, I created a second training dataset specifically for the GP regression model because we would be fitting the GP on the rates of death not the counts. The training dataset is called inla_gp_data. While the GP model will fit and predict a rate not a count, we still want to compare its predictions with respect to counts, so the test dataset is the same as before (inla_test_data). Once the predictions of rate of death per 100k are obtained from the GPR model, we will convert them back into counts using the cluster populations.
+First, I created an in sample dataset (inla_insample_data) which has variables ID (which represents the cluster label), ID2 (which is basically an index label), response (cluster mortality), time (time index label 1-66), and months (month label 1-12). Then, I create an out of sample dataset (inla_outsample_data) in which I decided to hold out the last 6 months of the data (67-72 or July-Dec 2019) so I replaced those response values with NAs. This is how you get INLA to make predictions/forecasts because it does so based on the posterior predictive distribution.
 
 ```{r}
 cluster_mortality_total_red = cluster_mortality_total[13:72,]
@@ -2694,15 +2544,15 @@ response = ceiling(response)
 response2 = t(cluster_mortality_rate_red)
 response2 = as.vector(response2)
 
-id = rep(c(1:7),60)
-id2 = 1:(7*60)
-time = rep(c(1:60),each = 7)
+id = rep(c(1:num_clus),60)
+id2 = 1:(num_clus*60)
+time = rep(c(1:60),each = num_clus)
 
 inla_full_data = data.frame(id,id2,response,time)
 
 inla_full_data2 = data.frame(id,id2,response2,time)
 
-months = rep(c(1:12),each = 7)
+months = rep(c(1:12),each = num_clus)
 months = rep(months,5)
 inla_full_data = cbind(inla_full_data,months)
 
@@ -2713,16 +2563,10 @@ inla_full_data = cbind(inla_full_data,months)
 inla_full_data$months = factor(inla_full_data$months)
 
 #Add multiple intercept columns, one for each cluster 
-Intercept1 = rep(c(1,NA,NA,NA,NA,NA,NA),60)
-Intercept2 = rep(c(NA,1,NA,NA,NA,NA,NA),60)
-Intercept3 = rep(c(NA,NA,1,NA,NA,NA,NA),60)
-Intercept4 = rep(c(NA,NA,NA,1,NA,NA,NA),60)
-Intercept5 = rep(c(NA,NA,NA,NA,1,NA,NA),60)
-Intercept6 = rep(c(NA,NA,NA,NA,NA,1,NA),60)
-Intercept7 = rep(c(NA,NA,NA,NA,NA,NA,1),60)
+Intercept1 = rep(c(1,NA),60)
+Intercept2 = rep(c(NA,1),60)
 
-inla_full_data = cbind(inla_full_data,Intercept1,Intercept2,Intercept3,Intercept4,
-          Intercept5,Intercept6,Intercept7)
+inla_full_data = cbind(inla_full_data,Intercept1,Intercept2)
 
 # response = replace_na(response,0.01)
 inla_gp_data = inla_full_data2
@@ -2750,19 +2594,18 @@ We wanted to compare the performance of our proposed model with a few reference 
 
 In other words,
 
-$Y_{i,t} \sim Pois(\lambda_{i,t})$ for $i=1,...,7$ and $t=1,...,54$ where $log(\lambda_{i,t}) = \beta_0 + \beta_1 * I \{t=2,14,...,50 \} + ... + \beta_{11} * I \{t=12,24,...,54 \} + u_i$
+$Y_{c,t} \sim Pois(\Lambda_{c,t})$ for $c=1,2$ and $t=1,...,54$ where $\Lambda_{c,t} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \beta_1 I \{t \, mod \, 12 = 1 \} + ... + \beta_{11} I \{t \, mod \, 12 = 11 \} + \textbf{F}_c)$
 
-where the random effect $u_i \sim MVN(0,\tau \Sigma)$
+where the random effect $\textbf{F} | \tau \sim \mathcal{GP}(\textbf{0},\tau \boldsymbol{\Sigma})$
 
-We wanted the first reference model to be simple, so we assumed that the random effects $u_i$ are iid. This means that $\Sigma$ is simply a diagonal matrix of scaling factors. The hyperparameter $log(\tau)$ is by default assigned a $log \; \Gamma(1,0.00005)$ prior.
+We wanted the first reference model to be simple, so we assumed that the random effects $\textbf{F}_c$ are iid. This means that $\Sigma$ is simply a diagonal matrix of scaling factors. The hyperparameter $log(\tau)$ is by default assigned a $log \; \Gamma(1,0.00005)$ prior.
 
 ```{r}
 #Write a function to fit our poisson glmm in INLA 
 ref_model1 = function(dataset,a_prior = 1,b_prior = 5e-05,link=1){
   ###Fit INLA model 
   prec_prior <- list(prec = list(prior = "loggamma", param = c(a_prior,b_prior)))
-  ref_formula1 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-    Intercept5 + Intercept6 + Intercept7 + f(id,model = "iid", hyper = prec_prior) #could use id or id2 
+  ref_formula1 = response ~ -1 + months + Intercept1 + Intercept2 + f(id,model = "iid", hyper = prec_prior) #could use id or id2 
   model = inla(formula = ref_formula1,family = "poisson",data = dataset,
                   control.compute = list(dic=TRUE,waic=TRUE),
                   control.inla = list(strategy = "laplace"),
@@ -2810,7 +2653,7 @@ ref_model1 = function(dataset,a_prior = 1,b_prior = 5e-05,link=1){
 }
 
 #Run model 
-ref_model1_fit = ref_model1(dataset = inla_insample_data,a_prior = 1,b_prior = 5e-5)
+ref_model1_fit = ref_model1(dataset = inla_insample_data,a_prior = 1,b_prior = 0.00001)
 
 #Extract DIC and WAIC
 ref_model1_DIC = ref_model1_fit$model_DIC
@@ -2825,8 +2668,7 @@ ref_model1_fit$exp_effects
 ref_model1_fit$param_plot
 ref_model1_fit$hyperparam_plot
 ```
-
-Note: SD for ID: standard deviation for the means (avg intensities) corresponding to the 8 different clusters was ???
+Note: SD for ID: standard deviation for the means (avg intensities) corresponding to the 8 different clusters was 1.84
 
 Plot of posterior predictive estimates with credible interval bands OVERLAID on response: 
 
@@ -2840,6 +2682,7 @@ pp_insample_plot = function(num_plots = num_clus, ref_data = inla_insample_data,
   
   # title = sprintf("Posterior Predictive Fits for Cluster %s",i)
   title = sprintf("Cluster %s",i)
+  
   
   post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
     geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + ggtitle(title)
@@ -2859,9 +2702,9 @@ For our second reference model, we decided to fit a Besag-York-Mollie model, whi
 
 The BYM model can be written as,
 
-$Y_{i,t} \sim Pois(\lambda_{i,t})$ for $i=1,...,7$ and $t=1,...,54$ where $log(\lambda_{i,t}) = \beta_0 + \beta_1 * I \{t=2,14,...,50 \} + ... + \beta_{11} * I \{t=12,24,...,54 \} + \phi + u_i$
+$Y_{c,t} \sim Pois(\Lambda_{c,t})$ for $c=1,2$ and $t=1,...,54$ where $\Lambda_{c,t} | \textbf{S} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \beta_1 I \{t \, mod \, 12 = 1 \} + ... + \beta_{11} I \{t \, mod \, 12 = 11 \} + \phi_c + \textbf{F}_c)$
 
-where $p(\phi) \propto exp(-\frac{1}{2} \sum_{i \sim j} (\phi_i - \phi_j)^2)$ and $u_i \sim MVN(0,\tau \Sigma)$.
+where $p(\boldsymbol{\phi}) \propto \exp(-\frac{1}{2} \sum_{c_1 \sim c_2} (\phi_{c_1} - \phi_{c_2})^2)$ and $\textbf{F} | \; \textbf{S}, \tau \sim \mathcal{GP}(\textbf{0},\tau \boldsymbol{\Sigma})$.
 
 Note: it is more commonly known that ICAR components are conditionally normally distributed.
 
@@ -2879,8 +2722,7 @@ ref_model2 = function(dataset,a_prec_prior = 1,b_prec_prior = 5e-04,a_phi_prior 
     prior = "loggamma",
     param = c(a_phi_prior,b_phi_prior))
   )
-  ref_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-    Intercept5 + Intercept6 + Intercept7 + 
+  ref_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + 
     f(id, model = "bym", graph = huge.est, hyper = bym_prior) #ID2 in formula results in error 
   model = inla(formula = ref_formula2,family = "poisson",data = dataset,
                   control.compute = list(dic=TRUE,waic=TRUE),
@@ -2929,8 +2771,8 @@ ref_model2 = function(dataset,a_prec_prior = 1,b_prec_prior = 5e-04,a_phi_prior 
 }
 
 #Fit ref_model2
-ref_model2_fit = ref_model2(dataset = inla_insample_data,a_prec_prior = 1,b_prec_prior = 5e-4,
-                            a_phi_prior = 1,b_phi_prior = 5e-4)
+ref_model2_fit = ref_model2(dataset = inla_insample_data,a_prec_prior = 1,b_prec_prior = 1e-5,
+                            a_phi_prior = 1,b_phi_prior = 1)
 
 #Extract DIC and WAIC
 ref_model2_DIC = ref_model2_fit$model_DIC
@@ -2953,15 +2795,15 @@ pp_insample_plot(pred_data = ref_model2_fit$fitted_values)
 
 Finally, we fit our proposed model which we call a kernel graph regression model. It also takes the form of a latent Gaussian model as shown below:
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{i,t} | \textbf{X} = exp(\beta_0 + F_{i,t})$
+$\Lambda_{c,t} | \textbf{F}, \textbf{S} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \beta_1 I \{t \, mod \, 12 = 1 \} + ... + \beta_{11} I \{t \, mod \, 12 = 11 \} + \textbf{F}_{c,t})$
 
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,K \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(x_{t_1},x_{t_2})(H^2)_{n_1,n_2}$.
+where the graph signal $\textbf{F} | \textbf{S}, \rho_{rbf}, \rho_{p}, \sigma^2_{EPA} \sim \mathcal{GP}(\textbf{0},\textbf{K}_{EPA} \otimes \textbf{H}^2)$ with $Cov(F_{c_1,t_1},F_{c_2,t_2}) = \left[ \textbf{K}^{EPA} \right]_{t_1,t_2} \left[ \textbf{H}^2 \right]_{c_1,c_2}$.
 
 The key difference here is that the covariance matrix of this GP is specified by the kronecker product of $K$, which is the time kernel gram matrix calculated from the EPA air quality data, and $H$, which is the graph filter which is calculated from the adjacency matrix estimated by glasso using the HUGE package. This matrix is completely known and can be directly plugged into INLA as the covariance matrix of our underlying GP using the "generic0" specification as shown below:
 
 ## Calculating gram matrix K from EPA data
 
-Using the EPA air quality data, we can calculate the gram matrix K which will characterize the dependence structure of air quality (across 7 different pollutants and AQI) over time. This is done by calculating the squared difference between all of the observations at two different time points e.g. 64 observations for Jan 2014 compared with the 64 observations for Feb 2014. For the in sample analysis, the resulting matrix is 66x66 because we are holding out the last 6 months of observations.
+Using the EPA air quality data, we can calculate the gram matrix K which will characterize the dependence structure of air quality (across 7 different pollutants and AQI) over time. This is done by calculating the squared difference between all of the observations at two different time points e.g. 16 observations for Jan 2014 compared with the 64 observations for Feb 2014. For the in sample analysis, the resulting matrix is 54x54 because we are holding out the last 6 months of observations.
 
 ```{r}
 EPA_kernel = function(EPA_data = final_EPA_agg_data,time_span,rho_rbf,rho_periodic,sigma2){
@@ -2976,12 +2818,16 @@ EPA_kernel = function(EPA_data = final_EPA_agg_data,time_span,rho_rbf,rho_period
       AQIa = unique(A$AQI)
       AQIb = unique(B$AQI)
       
-      ABtest = c((A$Value-B$Value)^2,(AQIa-AQIb)^2) #7 clusters * 8 measurements 
+      ABtest = c((A$Value-B$Value)^2,(AQIa-AQIb)^2) #2 clusters * 8 measurements 
       # K_EPA[i,j] = exp(-sum(ABtest) / (2*rho_rbf)) * sigma2
       
-      K_EPA[i,j] = exp(- (sum(ABtest)^2)
-                     / (2*rho_rbf)) * exp(- (2*sin(sum(abs(ABtest))*pi/12)^2)
-                     / (rho_periodic)) * sigma2
+      # K_EPA[i,j] = exp(- (sum(ABtest)) ###square this sum or remove it??? 
+      #                / (2*rho_rbf)) * exp(- (2*sin(sum(abs(ABtest))*pi/12)^2)
+      #                / (rho_periodic)) * sigma2
+      
+      K_EPA[i,j] = exp(- (mean(ABtest)) ###mean or sum??? 
+               / (2*rho_rbf)) * exp(- (2*sin(sum(abs(ABtest))*pi/12)^2)
+               / (rho_periodic)) * sigma2
       
       j = j+1
     }
@@ -3037,11 +2883,11 @@ GLMM with type 0 generic specification (known covariance matrix)
 kgr_model2 = function(dataset, rho_EPA_rbf = 1, rho_EPA_periodic = 1, sigma2_EPA = 1,link=1){
   
   #Calculate gram matrix K_EPA
-  K_EPA = EPA_kernel(time_span = length(unique(dataset$time)),
+  K_EPA2 = EPA_kernel2(time_span = length(unique(dataset$time)),
                      rho_rbf = rho_EPA_rbf, rho_periodic = rho_EPA_periodic, sigma2 = sigma2_EPA)
   
   #Heatmap of resulting K 
-  K_EPA_heatmap = matrix_heatmap(K_EPA,title = "K_EPA Heatmap")
+  K_EPA_heatmap2 = matrix_heatmap(K_EPA2,title = "K_EPA Heatmap")
   
   #Calculate trace norm of gram matrix
   K_EPA_weight = norm((1/60)*K_EPA,type = "F")
@@ -3056,14 +2902,12 @@ kgr_model2 = function(dataset, rho_EPA_rbf = 1, rho_EPA_periodic = 1, sigma2_EPA
   # cov_Fnorm = norm(covGP,type = "F")
   
   #Heatmap of resulting K 
-  inv_covGP_heatmap = matrix_heatmap(inv_covGP,title = "")
+  inv_covGP_heatmap = matrix_heatmap(inv_covGP,title = "Precision matrix heatmap")
   
   ###Fit INLA model 
-  # kgr_formula2 = response ~ -1 + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-  #   Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP)
+  # kgr_formula2 = response ~ -1 + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP)
   
-  kgr_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-    Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP)
+  kgr_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP)
   
   
   model = inla(formula = kgr_formula2,family = "poisson",data = dataset,
@@ -3123,7 +2967,8 @@ kgr_model2 = function(dataset, rho_EPA_rbf = 1, rho_EPA_periodic = 1, sigma2_EPA
 }
 
 #Fit kgr_model2
-kgr_model2_fit = kgr_model2(dataset = inla_insample_data,rho_EPA_rbf = 23.009,rho_EPA_periodic = 5253.017, sigma2_EPA = 0.928)
+kgr_model2_fit = kgr_model2(dataset = inla_insample_data, rho_EPA_rbf = 125.474,
+                            rho_EPA_periodic = 2.066, sigma2_EPA = 4.928)
 
 #Extract DIC and WAIC 
 kgr_model2_DIC = kgr_model2_fit$model_DIC
@@ -3147,11 +2992,11 @@ pp_insample_plot(pred_data = kgr_model2_fit$fitted_values)
 
 We can also simplify the covariance of our underlying GP and see how our proposed model compares with a simplified version with a simple time kernel:
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{t} | \textbf{X} = exp(\beta_0 + F_{t})$
+$\Lambda_{c,t} | \textbf{F} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \textbf{F}_{t})$
 
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,Ktime)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(t_1,t_2)$.
+where the graph signal $\textbf{F} | \rho_{rbf}, \rho_{p}, \sigma^2_{time} \sim \mathcal{GP}(\textbf{0},\textbf{K}_{time})$ with $Cov(F_{c_1,t_1},F_{c_2,t_2}) = \left[ \textbf{K}^{time} \right]_{t_1,t_2}$.
 
-Instead of calculating gram matrix K based on covariate (EPA variables) similarity, our gram matrix K is simply a time kernel where similar values of t (months 1-72) have larger covariances. As a result, this model has no spatial dependence structure built in.
+Instead of calculating gram matrix K based on covariate (EPA variables) similarity, our gram matrix K is simply a time kernel where similar values of t (months 1-60) have larger covariances. As a result, this model has no spatial dependence structure built in.
 
 ## Calculating simple time kernel K
 
@@ -3163,7 +3008,7 @@ time_kernel = function(time_span,rho_rbf,rho_periodic,sigma2){
     for (j in 1:time_span){
       # K_time[i,j] = exp(- (abs(i-j)^2) / (2*rho)) * sigma2
       
-      K_time[i,j] = exp(- (abs(i-j)^2) / (2*rho_rbf)) * exp(- (2*sin(sum(abs(i-j))*pi/12)^2)
+      K_time[i,j] = exp(- (abs(i-j)^2) / (2*rho_rbf)) * exp(- (2*sin(sum(abs(i-j))*3.14/12)^2)
                      / (rho_periodic)) * sigma2
     }
   }
@@ -3171,6 +3016,7 @@ time_kernel = function(time_span,rho_rbf,rho_periodic,sigma2){
   return(K_time)
 }
 ```
+
 
 
 ### LGCP with temporal kernel (Reference model 3)
@@ -3198,14 +3044,13 @@ ref_model3 = function(dataset, cluster, rho_time_rbf = 1, rho_time_periodic = 1,
 
   
   #Heatmap of resulting inv_K_time 
-  inv_K_time_heatmap = matrix_heatmap(inv_K_time,title = "")
+  inv_K_time_heatmap = matrix_heatmap(inv_K_time,title = "Precision matrix heatmap")
   
   
   ###Fitting the model on each cluster 
   inla_test_clus_data = dataset %>% filter(id == cluster)
   
-  ref_formula3 = response ~ -1 + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-    Intercept5 + Intercept6 + Intercept7 + f(time,model = "generic0",Cmatrix = inv_K_time)
+  ref_formula3 = response ~ -1 + Intercept1 + Intercept2 + f(time,model = "generic0",Cmatrix = inv_K_time)
   
   model = inla(ref_formula3, data = inla_test_clus_data, family = "poisson",
                     control.compute = list(dic=TRUE,waic=TRUE),
@@ -3283,33 +3128,21 @@ ref_model3_fit$hyperparam_plot
 ```
 
 ```{r}
-test1 = ref_model3(dataset = inla_insample_data, cluster = 1, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802)
-test2 = ref_model3(dataset = inla_insample_data, cluster = 2, rho_time_rbf = 498.918,
-                   rho_time_periodic = 120.307, sigma2_time = 0.014)
-test3 = ref_model3(dataset = inla_insample_data, cluster = 3, rho_time_rbf = 8.090,
-                   rho_time_periodic = 468.170, sigma2_time = 2.428)
-test4 = ref_model3(dataset = inla_insample_data, cluster = 4, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802) #why does sigma2 have to be so big here??
-test5 = ref_model3(dataset = inla_insample_data, cluster = 5, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802)
-test6 = ref_model3(dataset = inla_insample_data, cluster = 6, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802) #why does sigma2 have to be so big here??
-test7 = ref_model3(dataset = inla_insample_data, cluster = 7, rho_time_rbf = 474.985,
-                   rho_time_periodic = 2.050, sigma2_time = 1.489)
+test1 = ref_model3(dataset = inla_insample_data, cluster = 1, rho_time_rbf = 207.105,
+                   rho_time_periodic = 5.302, sigma2_time = 2.879)
+test2 = ref_model3(dataset = inla_insample_data, cluster = 2, rho_time_rbf = 16.827,
+                   rho_time_periodic = 212.333, sigma2_time = 1.053)
 
-ref_model3_fvs = rbind(test1$fitted_values,test2$fitted_values,test3$fitted_values,
-                       test4$fitted_values,test5$fitted_values,test6$fitted_values,
-                       test7$fitted_values)
+ref_model3_fvs = rbind(test1$fitted_values,test2$fitted_values)
 
 pp_insample_plot(num_plots = num_clus,ref_data = inla_insample_data,pred_data = ref_model3_fvs)
 ```
 
 ### KGR model with temporal kernel x graph filter (Proposed model 1)
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{i,t} | \textbf{X} = exp(\beta_0 + F_{i,t})$
+$\Lambda_{c,t} | \textbf{F}, \textbf{S} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \beta_1 I \{t \, mod \, 12 = 1 \} + ... + \beta_{11} I \{t \, mod \, 12 = 11 \} + \textbf{F}_{c,t})$
 
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,Ktime \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(t_1,t_2)(H^2)_{n_1,n_2}$.
+where the graph signal $\textbf{F} | \textbf{S}, \rho_{rbf}, \rho_{p}, \sigma^2_{time} \sim \mathcal{GP}(\textbf{0},\textbf{K}_{time} \otimes \textbf{H}^2)$ with $Cov(F_{c_1,t_1},F_{c_2,t_2}) = \left[ \textbf{K}^{time} \right]_{t_1,t_2} \left[ \textbf{H}^2 \right]_{c_1,c_2}$.
 
 ```{r,warning=FALSE}
 kgr_model1 = function(dataset, rho_time_rbf = 1, rho_time_periodic = 1, sigma2_time = 1, link=1){
@@ -3334,14 +3167,12 @@ kgr_model1 = function(dataset, rho_time_rbf = 1, rho_time_periodic = 1, sigma2_t
   inv_covGP2 = solve(covGP2)
   
   #Heatmap of resulting inv_covGP2 
-  inv_covGP2_heatmap = matrix_heatmap(inv_covGP2,title = "")
+  inv_covGP2_heatmap = matrix_heatmap(inv_covGP2,title = "Precision matrix heatmap")
   
   ###Fit INLA model 
-  # kgr_formula1 = response ~ -1 + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-  #   Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP2)
+  # kgr_formula1 = response ~ -1 + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP2)
   
-  kgr_formula1 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-    Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP2)
+  kgr_formula1 = response ~ -1 + months + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP2)
   
   model = inla(formula = kgr_formula1,family = "poisson",data = dataset,
                   control.compute = list(dic=TRUE,waic=TRUE,
@@ -3399,7 +3230,8 @@ kgr_model1 = function(dataset, rho_time_rbf = 1, rho_time_periodic = 1, sigma2_t
 }
 
 #Fit kgr_model1
-kgr_model1_fit = kgr_model1(dataset = inla_insample_data,rho_time_rbf = 63.888,rho_time_periodic = 5.845,sigma2_time = 0.720)
+kgr_model1_fit = kgr_model1(dataset = inla_insample_data,rho_time_rbf = 36.653,
+                            rho_time_periodic = 113.929,sigma2_time = 4.506)
 
 #Extract DIC and WAIC
 kgr_model1_DIC = kgr_model1_fit$model_DIC
@@ -3425,9 +3257,9 @@ Finally, we could also increase the complexity of our proposed model by includin
 
 ### Proposed model 3
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{it} | \textbf{X} = exp(\beta_0 + F_{it})$
+$\Lambda_{c,t} | \textbf{F}, \textbf{S} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \beta_1 I \{t \, mod \, 12 = 1 \} + ... + \beta_{11} I \{t \, mod \, 12 = 11 \} + \textbf{F}_{c,t})$
 
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,(Ktime \odot K_{EPA}) \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(t_1,t_2)k(x_{t_1},x_{t_2})(H^2)_{n_1,n_2}$.
+where the graph signal $\textbf{F} | \textbf{S}, \rho^{time}_{rbf}, \rho^{time}_{p}, \rho^{EPA}_{rbf}, \rho^{EPA}_{p}, \sigma^2 \sim \mathcal{GP}(\textbf{0},(\textbf{K}_{time} \odot \textbf{K}_{EPA}) \otimes \textbf{H}^2)$ with $Cov(F_{c_1,t_1},F_{c_2,t_2}) = \left[ \textbf{K}^{time} \right]_{t_1,t_2}  \left[ \textbf{K}^{EPA} \right]_{t_1,t_2}  \left[ \textbf{H}^2 \right]_{c_1,c_2}$.
 
 ```{r,warning=FALSE}
 kgr_model3 = function(dataset,rho_EPA_rbf = 1,rho_EPA_periodic = 1,rho_time_rbf = 1,rho_time_periodic = 1,sigma2 = 1,link=1){
@@ -3446,16 +3278,12 @@ kgr_model3 = function(dataset,rho_EPA_rbf = 1,rho_EPA_periodic = 1,rho_time_rbf 
   #Heatmap of resulting K 
   K_time_heatmap = matrix_heatmap(K_time,title = "K_time heatmap")
   
-  K_EPA_norm = norm(K_EPA,type = "F")
-  K_time_norm = norm(K_time,type = "F")
-  
   #Calculate trace norm of gram matrix
   gram = (K_EPA*K_time)/sigma2
   K_weight = norm((1/60)*gram,type = "F")
   
   
   ###Load graph regression kernel 
-  # covGP3 = kronecker(gram,H^2)
   covGP3 = kronecker(gram/60,(H^2)/7)
   
   #Need to ensure precision matrix is not computationally singular i.e det > 0
@@ -3465,14 +3293,13 @@ kgr_model3 = function(dataset,rho_EPA_rbf = 1,rho_EPA_periodic = 1,rho_time_rbf 
   inv_covGP3 = solve(covGP3)
   
   #Heatmap of resulting K 
-  inv_covGP3_heatmap = matrix_heatmap(inv_covGP3,title = "")
+  inv_covGP3_heatmap = matrix_heatmap(inv_covGP3,title = "Precision matrix heatmap")
+  
   
   ###Fit INLA model 
-  # kgr_formula3 = response ~ -1 + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-  #   Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP3)
+  # kgr_formula3 = response ~ -1 + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP3)
   
-  kgr_formula3 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-    Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP3)
+  kgr_formula3 = response ~ -1 + months + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP3)
   
   model = inla(formula = kgr_formula3,family = "poisson",data = dataset,
                   control.compute = list(dic=TRUE,waic=TRUE,
@@ -3510,8 +3337,6 @@ kgr_model3 = function(dataset,rho_EPA_rbf = 1,rho_EPA_periodic = 1,rho_time_rbf 
   kgr_model3_results = list(
     K_EPA_heatmap = K_EPA_heatmap,
     K_time_heatmap = K_time_heatmap,
-    K_EPA_weight = K_EPA_norm / (K_EPA_norm + K_time_norm),
-    K_time_weight = K_time_norm / (K_EPA_norm + K_time_norm),
     K_weight = K_weight/(K_weight + gfilter_weight),
     gfilter_weight = gfilter_weight/(K_weight + gfilter_weight),
     covmatrix = covGP3,
@@ -3533,8 +3358,8 @@ kgr_model3 = function(dataset,rho_EPA_rbf = 1,rho_EPA_periodic = 1,rho_time_rbf 
 }
 
 #Fit kgr_model3
-kgr_model3_fit = kgr_model3(dataset = inla_insample_data, rho_EPA_rbf = 77.429, rho_EPA_periodic = 5164.252,
-                            rho_time_rbf = 6802.120, rho_time_periodic = 8977.554, sigma2 = 4.997)
+kgr_model3_fit = kgr_model3(dataset = inla_insample_data, rho_EPA_rbf = 763.758, rho_EPA_periodic = 533.184,
+                            rho_time_rbf = 52.065, rho_time_periodic = 402.182, sigma2 = 1.538)
 
 #Extract DIC and WAIC
 kgr_model3_DIC = kgr_model3_fit$model_DIC
@@ -3544,8 +3369,6 @@ kgr_model3_WAIC = kgr_model3_fit$model_WAIC
 kgr_model3_fit$model_summary
 kgr_model3_fit$bri_hyperpar_summary
 kgr_model3_fit$exp_effects
-kgr_model3_fit$K_EPA_weight
-kgr_model3_fit$K_time_weight
 kgr_model3_fit$K_weight
 kgr_model3_fit$gfilter_weight
 kgr_model3_fit$num_jitters
@@ -3561,13 +3384,13 @@ pp_insample_plot(pred_data = kgr_model3_fit$fitted_values)
 
 ### Proposed model 4
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{it} | \textbf{X} = exp(\beta_0 + F_{it})$
+$\Lambda_{c,t} | \textbf{F}, \textbf{S} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \beta_1 I \{t \, mod \, 12 = 1 \} + ... + \beta_{11} I \{t \, mod \, 12 = 11 \} + \textbf{F}_{c,t})$
 
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,\frac{1}{2}(Ktime + K_{EPA}) \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = (k(t_1,t_2)+k(x_{t_1},x_{t_2}))(H^2)_{n_1,n_2}$.
+where the graph signal $\textbf{F} | \textbf{S}, \rho^{time}_{rbf}, \rho^{time}_{p}, \rho^{EPA}_{rbf}, \rho^{EPA}_{p}, \sigma^2_{time}, \sigma^2_{EPA}  \sim \mathcal{GP}(\textbf{0},(\frac{1}{2}(\textbf{K}_{time} + \textbf{K}_{EPA}) \otimes \textbf{H}^2)$ with $Cov(F_{c_1,t_1},F_{c_2,t_2}) = \frac{1}{2} \left( \left[ \textbf{K}^{time} \right]_{t_1,t_2} + \left[ \textbf{K}^{EPA} \right]_{t_1,t_2} \right) \left[ \textbf{H}^2 \right]_{c_1,c_2}$.
 
 ```{r,warning=FALSE}
-kgr_model4 = function(dataset,rho_EPA_rbf = 1, rho_EPA_periodic = 1,
-                               rho_time_rbf = 1, rho_time_periodic = 1, sigma2_EPA = 1, sigma2_time = 3,link = 1){
+kgr_model4 = function(dataset,rho_EPA_rbf = 1,rho_EPA_periodic = 1,rho_time_rbf = 1,
+                      rho_time_periodic = 1,sigma2_EPA = 1,sigma2_time = 1,link = 1){
   
   ###Calculating gram matrix K_EPA
   K_EPA = EPA_kernel(time_span = length(unique(dataset$time)),
@@ -3583,14 +3406,10 @@ kgr_model4 = function(dataset,rho_EPA_rbf = 1, rho_EPA_periodic = 1,
   #Heatmap of resulting K 
   K_time_heatmap = matrix_heatmap(K_time,title = "K_time heatmap")
   
-  K_EPA_norm = norm(K_EPA,type = "F")
-  K_time_norm = norm(K_time,type = "F")
-  
   gram = 0.5*(K_time+K_EPA)
   K_weight = norm((1/60)*gram,type = "F")
 
   ###Load graph regression kernel 
-  # covGP4 = kronecker(gram,(H^2))
   covGP4 = kronecker(gram/60,(H^2)/7)
   
   #Need to ensure precision matrix is not computationally singular i.e det > 0
@@ -3600,15 +3419,13 @@ kgr_model4 = function(dataset,rho_EPA_rbf = 1, rho_EPA_periodic = 1,
   inv_covGP4 = solve(covGP4)
   
   #Heatmap of resulting K 
-  inv_covGP4_heatmap = matrix_heatmap(inv_covGP4,title = "")
+  inv_covGP4_heatmap = matrix_heatmap(inv_covGP4,title = "Precision matrix heatmap")
   
   
   ###Fit INLA model 
-  # kgr_formula4 = response ~ -1 + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-  #   Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP4)
+  # kgr_formula4 = response ~ -1 + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP4)
   
-  kgr_formula4 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-    Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP4)
+  kgr_formula4 = response ~ -1 + months + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP4)
   
   model = inla(formula = kgr_formula4,family = "poisson",data = dataset,
                   control.compute = list(dic=TRUE,waic=TRUE,
@@ -3646,8 +3463,6 @@ kgr_model4 = function(dataset,rho_EPA_rbf = 1, rho_EPA_periodic = 1,
   kgr_model4_results = list(
     K_EPA_heatmap = K_EPA_heatmap,
     K_time_heatmap = K_time_heatmap,
-    K_EPA_weight = K_EPA_norm / (K_EPA_norm + K_time_norm),
-    K_time_weight = K_time_norm / (K_EPA_norm + K_time_norm),
     K_weight = K_weight/(K_weight + gfilter_weight),
     gfilter_weight = gfilter_weight/(K_weight + gfilter_weight),
     covmatrix = covGP4,
@@ -3669,8 +3484,8 @@ kgr_model4 = function(dataset,rho_EPA_rbf = 1, rho_EPA_periodic = 1,
 }
 
 #Fit kgr_model4
-kgr_model4_fit = kgr_model4(dataset = inla_insample_data, rho_EPA_rbf = 259.326, rho_EPA_periodic = 246.306,
-                            rho_time_rbf = 2.699, rho_time_periodic = 86.005, sigma2_EPA = 3.215, sigma2_time = 3.583)
+kgr_model4_fit = kgr_model4(dataset = inla_insample_data, rho_EPA_rbf = 27.258, rho_EPA_periodic = 7.175,
+                            rho_time_rbf = 33.593, rho_time_periodic = 173.952, sigma2_EPA = 4.830, sigma2_time = 4.573)
 
 #Extract DIC and WAIC 
 kgr_model4_DIC = kgr_model4_fit$model_DIC
@@ -3680,8 +3495,6 @@ kgr_model4_WAIC = kgr_model4_fit$model_WAIC
 kgr_model4_fit$model_summary
 kgr_model4_fit$bri_hyperpar_summary
 kgr_model4_fit$exp_effects
-kgr_model4_fit$K_EPA_weight
-kgr_model4_fit$K_time_weight
 kgr_model4_fit$K_weight
 kgr_model4_fit$gfilter_weight
 kgr_model4_fit$num_jitters
@@ -3697,9 +3510,9 @@ pp_insample_plot(pred_data = kgr_model4_fit$fitted_values)
 
 ### Proposed model 5
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{it} | \textbf{X} = exp(\beta_0 + F_{it})$
+$\Lambda_{c,t} | \textbf{F}, \textbf{S} = \exp(\beta_{c1} I \{ c=1 \} + \beta_{c2} I \{ c=2 \} + \beta_1 I \{t \, mod \, 12 = 1 \} + ... + \beta_{11} I \{t \, mod \, 12 = 11 \} + \textbf{F}_{c,t})$
 
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,\frac{1}{3}(K_{AR} + K_{DL} + K_{Interaction}) \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = (k(t_1,t_2)+k(x_{t_1},x_{t_2}))(H^2)_{n_1,n_2}$.
+where the graph signal $\textbf{F} | \textbf{S}, \rho^{AR}_{rbf}, \rho^{AR}_{p}, \rho^{DL}_{rbf}, \rho^{DL}_{p}, \rho^{Int}_{rbf}, \rho^{Int}_{p}, \sigma^2_{AR}, \sigma^2_{DL} , \sigma^2_{Int} \sim \mathcal{GP}(\textbf{0},((\frac{1}{3} \textbf{K}_{AR} + \frac{1}{3} \textbf{K}_{DL} + \frac{1}{3} \textbf{K}_{Interaction}) \otimes \textbf{H}^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = (k(t_1,t_2)+k(x_{t_1},x_{t_2}))(H^2)_{n_1,n_2}$.
 
 ```{r,warning=FALSE}
 kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf = 1, rho_DL_periodic = 1,
@@ -3736,7 +3549,7 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
                                  / (2*rho_AR_rbf)) * sigma2_AR
             
             K_covariate_periodic[j,k] = exp(- ((ts[j] - ts[k])^2) #Locally periodic kernel 
-                         / (2*rho_AR_rbf)) * exp(- (2*sin((abs(ts[j] - ts[k]))*pi/12)^2)
+                         / (2*rho_AR_rbf)) * exp(- (2*sin((abs(ts[j] - ts[k]))*3.14/12)^2)
                          / (rho_AR_periodic)) * sigma2_AR
           }
           else{
@@ -3773,8 +3586,6 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
     K_AR = K_AR + ((1/num_clus)*K_AR_cluster[[i]])
     K_AR_periodic = K_AR_periodic + ((1/num_clus)*K_AR_periodic_cluster[[i]])
   }
-  
-  K_AR_norm = norm(K_AR_periodic,type = "F")
   
   #Heatmap of resulting K 
   # K_AR_heatmap = corrplot(K_AR, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
@@ -3815,7 +3626,7 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
             K_DL[j,k] = exp(- (sum(S_DL_clus[j,] - S_DL_clus[k,])^2) / (2*rho_DL_rbf)) * sigma2_DL
             
             K_DL_periodic[j,k] = exp(- (sum(S_DL_clus[j,] - S_DL_clus[k,])^2)
-                                 / (2*rho_DL_rbf)) * exp(- (2*sin(sum(abs(S_DL_clus[j,] - S_DL_clus[k,]))*pi/12)^2)
+                                 / (2*rho_DL_rbf)) * exp(- (2*sin(sum(abs(S_DL_clus[j,] - S_DL_clus[k,]))*3.14/12)^2)
                                  / (rho_DL_periodic)) * sigma2_DL
             
           } 
@@ -3852,8 +3663,6 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
     K_DL = K_DL + ((1/num_clus)*K_DL_cluster[[i]])
     K_DL_periodic = K_DL_periodic + ((1/num_clus)*K_DL_periodic_cluster[[i]])
   }
-  
-  K_DL_norm = norm(K_DL_periodic,type = "F")
   
   #Heatmap of resulting K 
   # K_DL_heatmap = corrplot(K_DL, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10),
@@ -3907,12 +3716,12 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
           #Locally periodic kernels 
           K_int0_periodic[i,j] = exp(- ((interaction[lag0_idx[i]] - interaction[lag0_idx[j]])^2)
                           / (2*rho_int_rbf)) * 
-            exp(- (2*sin((abs(interaction[lag0_idx[i]] - interaction[lag0_idx[j]]))*pi/12)^2)
+            exp(- (2*sin((abs(interaction[lag0_idx[i]] - interaction[lag0_idx[j]]))*3.14/12)^2)
                           / (rho_int_periodic)) * sigma2_int
               
           K_int1_periodic[i,j] = exp(- ((interaction[lag1_idx[i]] - interaction[lag1_idx[j]])^2)
                                / (2*rho_int_rbf)) * 
-            exp(- (2*sin((abs(interaction[lag1_idx[i]] - interaction[lag1_idx[j]]))*pi/12)^2)
+            exp(- (2*sin((abs(interaction[lag1_idx[i]] - interaction[lag1_idx[j]]))*3.14/12)^2)
                           / (rho_int_periodic)) * sigma2_int
         }
       }
@@ -3949,8 +3758,6 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
     K_interaction_periodic = K_interaction_periodic + ((1/length(K_Interaction_periodic_cluster))*K_Interaction_periodic_cluster[[i]])
   }
   
-  K_Int_norm = norm(K_interaction_periodic,type = "F")
-  
   #Heatmap of resulting K 
   # K_Interaction_heatmap = corrplot(K_interaction, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10), title = "Interaction Covariance Structure")
   # K_Interaction_heatmap = corrplot(K_interaction_periodic, order = 'original', cl.pos = 'b', tl.pos = 'n',method = "color", col = COL1('YlOrRd',10), title = "Periodic Interaction Covariance Structure")
@@ -3962,7 +3769,6 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
   K_weight = norm((1/60)*gram,type = "F")
   
   ###Load graph regression kernel 
-  # covGP5 = kronecker(gram,H^2)
   covGP5 = kronecker(gram/60,(H^2)/7)
   
   #Need to ensure precision matrix is not computationally singular i.e det > 0
@@ -3972,15 +3778,13 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
   inv_covGP5 = solve(covGP5)
   
   #Heatmap of resulting K 
-  inv_covGP5_heatmap = matrix_heatmap(inv_covGP5,title = "")
+  inv_covGP5_heatmap = matrix_heatmap(inv_covGP5,title = "Precision matrix heatmap")
   
   
   ###Fit INLA model 
-  # kgr_formula5 = response ~ -1 + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-  #   Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP5)
+  # kgr_formula5 = response ~ -1 + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP5)
   
-  kgr_formula5 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-    Intercept5 + Intercept6 + Intercept7 + f(id2,model = "generic0",Cmatrix = inv_covGP5)
+  kgr_formula5 = response ~ -1 + months + Intercept1 + Intercept2 + f(id2,model = "generic0",Cmatrix = inv_covGP5)
   
   model = inla(formula = kgr_formula5,family = "poisson",data = dataset,
                   control.compute = list(dic=TRUE,waic=TRUE,
@@ -4019,9 +3823,6 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
     K_AR_heatmap = K_AR_heatmap, 
     K_DL_heatmap = K_DL_heatmap,
     K_Interaction_heatmap = K_Interaction_heatmap,
-    K_AR_weight = K_AR_norm / (K_AR_norm + K_DL_norm + K_Int_norm),
-    K_DL_weight = K_DL_norm / (K_AR_norm + K_DL_norm + K_Int_norm),
-    K_Int_weight = K_Int_norm / (K_AR_norm + K_DL_norm + K_Int_norm),
     K_weight = K_weight/(K_weight + gfilter_weight),
     gfilter_weight = gfilter_weight/(K_weight + gfilter_weight),
     covmatrix = covGP5,
@@ -4043,9 +3844,9 @@ kgr_model5 = function(dataset, rho_AR_rbf = 1, rho_AR_periodic = 1, rho_DL_rbf =
 }
 
 #Fit kgr_model5
-kgr_model5_fit = kgr_model5(dataset = inla_insample_data, rho_AR_rbf = 0.016, rho_AR_periodic = 0.019,
-                            rho_DL_rbf = 0.013, rho_DL_periodic = 0.003, rho_int_rbf = 0.002,
-                            rho_int_periodic = 0.011, sigma2_AR = 4.002, sigma2_DL = 0.486, sigma2_int = 3.021, link=1)
+kgr_model5_fit = kgr_model5(dataset = inla_insample_data, rho_AR_rbf = 0.014, rho_AR_periodic = 0.010,
+                            rho_DL_rbf = 0.006, rho_DL_periodic = 0.004, rho_int_rbf = 0.011,
+                            rho_int_periodic = 0.013, sigma2_AR = 3.751, sigma2_DL = 4.269, sigma2_int = 4.979, link=1)
 
 #Extract DIC and WAIC 
 kgr_model5_DIC = kgr_model5_fit$model_DIC
@@ -4072,7 +3873,7 @@ kgr_model5_fit$hyperparam_plot
 pp_insample_plot(pred_data = kgr_model5_fit$fitted_values)
 ```
 
-# Comparing in DIC and WAIC between models
+# Comparing DIC and WAIC between models
 
 With INLA, we can obtain the deviance information criterion (DIC) and the widely appliciable (or Watanabe-Akaike) information criterion (WAIC) which have the following formulas: 
 
@@ -4145,8 +3946,7 @@ for (i in 1:num_clus){
 #Table 1: In sample RMSE
 RMSE_table = data.frame(RMSE_table)
 
-colnames(RMSE_table) = c("Cluster 1","Cluster 2","Cluster 3","Cluster 4",
-                         "Cluster 5","Cluster 6","Cluster 7")
+colnames(RMSE_table) = c("Cluster 1","Cluster 2")
 rownames(RMSE_table) = c("BYM model","LGCP model","Proposed KGR model 1",
                          "Proposed KGR model 2","Proposed KGR model 3",
                          "Proposed KGR model 4","Proposed KGR model 5")
@@ -4154,7 +3954,10 @@ rownames(RMSE_table) = c("BYM model","LGCP model","Proposed KGR model 1",
 RMSE_table
 ```
 
+
 # OUT OF SAMPLE FITTING (FORECASTING) ANALYSIS 
+
+For out of sample model fitting, we now use inla_outsample_data which has t=60 now instead of t=54. Recall that the response values for t=55,...,60 are NA in order for INLA to make posterior predictive predictions. 
 
 # Plots of true mortality values
 
@@ -4164,20 +3967,9 @@ true_mortality$time = as.numeric(true_mortality$time)
 
 #Combine plots with library patchwork
 true1 = true_mortality %>% filter(id == 1) %>% ggplot(aes(x=time,y=response)) + geom_line()
-
 true2 = true_mortality %>% filter(id == 2) %>% ggplot(aes(x=time,y=response)) + geom_line() 
 
-true3 = true_mortality %>% filter(id == 3) %>% ggplot(aes(x=time,y=response)) + geom_line() 
-
-true4 = true_mortality %>% filter(id == 4) %>% ggplot(aes(x=time,y=response)) + geom_line() 
-
-true5 = true_mortality %>% filter(id == 5) %>% ggplot(aes(x=time,y=response)) + geom_line()
-
-true6 = true_mortality %>% filter(id == 6) %>% ggplot(aes(x=time,y=response)) + geom_line()
-
-true7 = true_mortality %>% filter(id == 7) %>% ggplot(aes(x=time,y=response)) + geom_line()
-
-true1 + true2 + true3 + true4 + true5 + true6 + true7
+true1 + true2
 ```
 
 ```{r}
@@ -4191,6 +3983,7 @@ pp_outsample_plot = function(num_plots = num_clus, ref_data = inla_full_data, pr
   # title = sprintf("Posterior Predictive Fits for Cluster %s",i)
   title = sprintf("Cluster %s",i)
 
+    
   post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
     geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + geom_vline(xintercept = 54,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title)
   print(post_pred_plot)
@@ -4198,21 +3991,12 @@ pp_outsample_plot = function(num_plots = num_clus, ref_data = inla_full_data, pr
 }
 ```
 
-## Fit a simple Poisson GLMM for our mortality data (Reference model 1)
 
-We wanted to compare the performance of our proposed model with a few reference models. The first one is a Poisson generalized linear mixed model. This model assumes the observed data follows a Poisson distribution and the hyperparameter $\lambda_i$ can be modeled using a mixed effects model with a log link.
-
-In other words,
-
-$Y_{i,t} \sim Pois(\lambda_{i,t})$ for $i=1,...,7$ and $t=1,...,60$ where $log(\lambda_{i,t}) = \beta_0 + \beta_1 * I \{t=2,14,...,62 \} + ... + \beta_{11} * I \{t=12,24,...,72 \} + u_i$
-
-where the random effect $u_i \sim MVN(0,\tau \Sigma)$
-
-We wanted the first reference model to be simple, so we assumed that the random effects $u_i$ are iid. This means that $\Sigma$ is simply a diagonal matrix of scaling factors. The hyperparameter $log(\tau)$ is by default assigned a $log \; \Gamma(1,0.00005)$ prior.
+## Reference model 1
 
 ```{r}
 #Run model 
-ref_model1_outfit = ref_model1(inla_outsample_data, a_prior=1, b_prior=5e-5)
+ref_model1_outfit = ref_model1(inla_outsample_data, a_prior=1, b_prior=1)
 
 #Extract DIC and WAIC
 ref_model1_DIC = ref_model1_outfit$model_DIC
@@ -4229,32 +4013,20 @@ ref_model1_outfit$hyperparam_plot
 pp_outsample_plot(pred_data = ref_model1_outfit$fitted_values)
 ```
 
-## Fitting a Besag-York-Mollie model (Reference model 2)
-
-For our second reference model, we decided to fit a Besag-York-Mollie model, which is a log-normal Poisson model with an intrinsic conditional autoregressive component to capture spatial autocorrelations i.e. a Besag model, plus a standard random effects term which is included to capture non-spatial heterogeneity. Obviously, this model is less naive than reference model 1 because it does not assume iid random effects.
-
-The BYM model can be written as,
-
-$Y_{i,t} \sim Pois(\lambda_{i,t})$ for $i=1,...,7$ and $t=1,...,60$ where $log(\lambda_{i,t}) = \beta_0 + \beta_1 * I \{t=2,14,...,62 \} + ... + \beta_{11} * I \{t=12,24,...,72 \} + \phi + u_i$
-
-where $p(\phi) \propto exp(-\frac{1}{2} \sum_{i \sim j} (\phi_i - \phi_j)^2)$ and $u_i \sim MVN(0,\tau \Sigma)$.
-
-Note: it is more commonly known that ICAR components are conditionally normally distributed.
-
-As one can see below, the summary outputs indicate that this model is very similar to the Poisson GLMM (reference model 1). The intercept and SD for the random effect component are estimated to almost the exact same as those estimated by the Poisson GLMM, indicating that including the spatial ICAR component is seemingly not very impactful.
+## Reference model 2
 
 ```{r}
 #Run model 
-ref_model2_outfit = ref_model2(dataset = inla_outsample_data,a_prec_prior = 1,b_prec_prior = 5e-4,
-                            a_phi_prior = 1,b_phi_prior = 5e-4)
+ref_model2_outfit = ref_model2(dataset = inla_outsample_data,a_prec_prior = 1,b_prec_prior = 1e-5,
+                            a_phi_prior = 1,b_phi_prior = 1)
 
 #Extract DIC and WAIC
 ref_model2_DIC = ref_model2_outfit$model_DIC
 ref_model2_WAIC = ref_model2_outfit$model_WAIC
 
 #Get summaries of parameter estimates
-ref_model2_outfit$model_summary %>% kable %>% kable_styling()
-ref_model2_outfit$bri_hyperpar_summary %>% kable %>% kable_styling()
+ref_model2_outfit$model_summary
+ref_model2_outfit$bri_hyperpar_summary
 ref_model2_outfit$exp_effects
 
 #Show plots
@@ -4265,17 +4037,12 @@ pp_outsample_plot(pred_data = ref_model2_outfit$fitted_values)
 
 ## Fitting kernel graph regression models
 
-### KGR model with time series kernel x graph filter (Proposed model 2)
-
-Finally, we fit our proposed model which we call a kernel graph regression model. It also takes the form of a latent Gaussian model as shown below:
-
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{i,t} | \textbf{X} = exp(\beta_0 + F_{i,t})$
-
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,K \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(x_{t_1},x_{t_2})(H^2)_{n_1,n_2}$.
+### Proposed model 2
 
 ```{r,warning=FALSE}
 #Run model 
-kgr_model2_outfit = kgr_model2(data = inla_outsample_data,rho_EPA_rbf = 23.009,rho_EPA_periodic = 5253.017, sigma2_EPA = 0.928)
+kgr_model2_outfit = kgr_model2(data = inla_outsample_data, rho_EPA_rbf = 125.474,
+                            rho_EPA_periodic = 2.066, sigma2_EPA = 4.928)
 
 #Extract DIC and WAIC
 kgr_model2_DIC = kgr_model2_outfit$model_DIC
@@ -4295,19 +4062,12 @@ kgr_model2_outfit$hyperparam_plot
 pp_outsample_plot(pred_data = kgr_model2_outfit$fitted_values)
 ```
 
-We can also simplify the covariance of our underlying GP and see how our proposed model compares with a simplified version with a simple time kernel:
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{t} | \textbf{X} = exp(\beta_0 + F_{t})$
-
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,Ktime)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(t_1,t_2)$.
-
-Instead of calculating gram matrix K based on covariate (EPA variables) similarity, our gram matrix K is simply a time kernel where similar values of t (months 1-72) have larger covariances. As a result, this model has no spatial dependence structure built in.
-
-### LGCP with temporal kernel (Reference model 3)
+### Reference model 3
 
 ```{r}
 #Fit ref_model3 on one cluster (to test)
-ref_model3_outfit = ref_model3(dataset = inla_outsample_data, cluster = 1, rho_time_rbf = 1,
+ref_model3_outfit = ref_model3(dataset = inla_outsample_data, cluster = 2, rho_time_rbf = 1,
                    rho_time_periodic = 1, sigma2_time = 5)
 
 #Extract DIC and WAIC
@@ -4318,6 +4078,7 @@ ref_model3_WAIC = ref_model3_outfit$model_WAIC
 ref_model3_outfit$model_summary
 ref_model3_outfit$bri_hyperpar_summary
 ref_model3_outfit$exp_effects
+
 ref_model3_outfit$K_time_weight
 ref_model3_outfit$gfilter_weight
 
@@ -4328,37 +4089,22 @@ ref_model3_outfit$hyperparam_plot
 ```
 
 ```{r}
-test1 = ref_model3(dataset = inla_outsample_data, cluster = 1, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802)
-test2 = ref_model3(dataset = inla_outsample_data, cluster = 2, rho_time_rbf = 498.918,
-                   rho_time_periodic = 120.307, sigma2_time = 0.014)
-test3 = ref_model3(dataset = inla_outsample_data, cluster = 3, rho_time_rbf = 8.090,
-                   rho_time_periodic = 468.170, sigma2_time = 2.428)
-test4 = ref_model3(dataset = inla_outsample_data, cluster = 4, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802) #why does sigma2 have to be so big here??
-test5 = ref_model3(dataset = inla_outsample_data, cluster = 5, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802)
-test6 = ref_model3(dataset = inla_outsample_data, cluster = 6, rho_time_rbf = 105.474,
-                   rho_time_periodic = 1.902, sigma2_time = 1.802) #why does sigma2 have to be so big here??
-test7 = ref_model3(dataset = inla_outsample_data, cluster = 7, rho_time_rbf = 474.985,
-                   rho_time_periodic = 2.050, sigma2_time = 1.489)
+test1 = ref_model3(dataset = inla_outsample_data, cluster = 1, rho_time_rbf = 207.105,
+                   rho_time_periodic = 5.302, sigma2_time = 2.879)
+test2 = ref_model3(dataset = inla_outsample_data, cluster = 2, rho_time_rbf = 16.827,
+                   rho_time_periodic = 212.333, sigma2_time = 1.053)
 
-
-ref_model3_outfvs = rbind(test1$fitted_values,test2$fitted_values,test3$fitted_values,
-                       test4$fitted_values,test5$fitted_values,test6$fitted_values,test7$fitted_values)
+ref_model3_outfvs = rbind(test1$fitted_values,test2$fitted_values)
 
 pp_outsample_plot(num_plots = num_clus,ref_data = inla_full_data,pred_data = ref_model3_outfvs)
 ```
 
-### KGR model with temporal kernel x graph filter (Proposed model 1)
-
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{i,t} | \textbf{X} = exp(\beta_0 + F_{i,t})$
-
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,Ktime \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(t_1,t_2)(H^2)_{n_1,n_2}$.
+### Proposed model 1
 
 ```{r}
 #Fit kgr_model1
-kgr_model1_outfit = kgr_model1(dataset = inla_outsample_data,rho_time_rbf = 63.888,rho_time_periodic = 5.845,sigma2_time = 0.720)
+kgr_model1_outfit = kgr_model1(dataset = inla_outsample_data,rho_time_rbf = 36.653,
+                            rho_time_periodic = 113.929,sigma2_time = 4.506)
 
 #Extract DIC and WAIC
 kgr_model1_DIC = kgr_model1_outfit$model_DIC
@@ -4380,14 +4126,10 @@ pp_outsample_plot(pred_data = kgr_model1_outfit$fitted_values)
 
 ### Proposed model 3
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{it} | \textbf{X} = exp(\beta_0 + F_{it})$
-
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,(Ktime*K_{EPA}) \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = k(t_1,t_2)k(x_{t_1},x_{t_2})(H^2)_{n_1,n_2}$.
-
 ```{r,warning=FALSE}
 #Fit kgr_model3
-kgr_model3_outfit = kgr_model3(dataset = inla_outsample_data, rho_EPA_rbf = 77.429, rho_EPA_periodic = 5164.252,
-                            rho_time_rbf = 6802.120, rho_time_periodic = 8977.554, sigma2 = 4.997, link=1)
+kgr_model3_outfit = kgr_model3(dataset = inla_outsample_data, rho_EPA_rbf = 763.758, rho_EPA_periodic = 533.184,
+                            rho_time_rbf = 52.065, rho_time_periodic = 402.182, sigma2 = 1.538, link=1)
 
 #Extract DIC and WAIC
 kgr_model3_DIC = kgr_model3_outfit$model_DIC
@@ -4410,23 +4152,20 @@ pp_outsample_plot(pred_data = kgr_model3_outfit$fitted_values)
 
 ### Proposed model 4
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{it} | \textbf{X} = exp(\beta_0 + F_{it})$
-
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,(Ktime + K_{EPA}) \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = (k(t_1,t_2)+k(x_{t_1},x_{t_2}))(H^2)_{n_1,n_2}$.
-
 ```{r,warning=FALSE}
 #Fit kgr_model4
-kgr_model4_outfit = kgr_model4(dataset = inla_outsample_data, rho_EPA_rbf = 259.326, rho_EPA_periodic = 246.306,
-                            rho_time_rbf = 2.699, rho_time_periodic = 86.005, sigma2_EPA = 3.215, sigma2_time = 3.583, link = 1)
+kgr_model4_outfit = kgr_model4(dataset = inla_outsample_data, rho_EPA_rbf = 27.258, rho_EPA_periodic = 7.175,
+                            rho_time_rbf = 33.593, rho_time_periodic = 173.952, sigma2_EPA = 4.830, sigma2_time = 4.573)
 
 #Extract DIC and WAIC 
 kgr_model4_DIC = kgr_model4_outfit$model_DIC
 kgr_model4_WAIC = kgr_model4_outfit$model_WAIC
 
 #Get summaries of parameter estimates
-kgr_model4_outfit$model_summary %>% kbl() %>% kable_styling()
-kgr_model4_outfit$bri_hyperpar_summary %>% kbl() %>% kable_styling()
+kgr_model4_outfit$model_summary
+kgr_model4_outfit$bri_hyperpar_summary
 kgr_model4_outfit$exp_effects
+
 kgr_model4_outfit$K_weight
 kgr_model4_outfit$gfilter_weight
 
@@ -4440,15 +4179,11 @@ pp_outsample_plot(pred_data = kgr_model4_outfit$fitted_values)
 
 ### Proposed model 5
 
-$vec(Y) | \Lambda, \textbf{X} \sim Pois(vec(\Lambda))$ and $\Lambda_{it} | \textbf{X} = exp(\beta_0 + F_{it})$
-
-where the graph signal $\textbf{F} | \textbf{X} \sim GP(0,\frac{1}{3}(K_{AR} + K_{DL} + K_{Interaction}) \otimes H^2)$ with $Cov[F_{n_1,t_1},F_{n_2,t_2}] = (k(t_1,t_2)+k(x_{t_1},x_{t_2}))(H^2)_{n_1,n_2}$.
-
 ```{r}
 #Fit kgr_model5
-kgr_model5_outfit = kgr_model5(dataset = inla_outsample_data, rho_AR_rbf = 0.016, rho_AR_periodic = 0.019,
-                            rho_DL_rbf = 0.013, rho_DL_periodic = 0.003, rho_int_rbf = 0.002,
-                            rho_int_periodic = 0.011, sigma2_AR = 4.002, sigma2_DL = 0.486, sigma2_int = 3.021, link=1)
+kgr_model5_outfit = kgr_model5(dataset = inla_outsample_data, rho_AR_rbf = 0.014, rho_AR_periodic = 0.010,
+                            rho_DL_rbf = 0.006, rho_DL_periodic = 0.004, rho_int_rbf = 0.011,
+                            rho_int_periodic = 0.013, sigma2_AR = 3.751, sigma2_DL = 4.269, sigma2_int = 4.979, link=1)
 
 #Extract DIC and WAIC 
 kgr_model5_DIC = kgr_model5_outfit$model_DIC
@@ -4462,10 +4197,11 @@ kgr_model5_outfit$K_weight
 kgr_model5_outfit$gfilter_weight
 
 #Show plots
-kgr_model5_outfit$K_AR_heatmap
-kgr_model5_outfit$K_DL_heatmap
-kgr_model5_outfit$K_Interaction_heatmap
-kgr_model5_outfit$prec_heatmap
+# heatmap(t(kgr_model5_outfit$prec))
+# kgr_model5_outfit$K_AR_heatmap
+# kgr_model5_outfit$K_DL_heatmap
+# kgr_model5_outfit$K_Interaction_heatmap
+# kgr_model5_outfit$prec_heatmap
 kgr_model5_outfit$param_plot
 kgr_model5_outfit$hyperparam_plot
 pp_outsample_plot(pred_data = kgr_model5_outfit$fitted_values)
@@ -4477,6 +4213,7 @@ pp_outsample_plot(pred_data = kgr_model5_outfit$fitted_values)
 print(degree_connectivity)
 ```
 
+To compare out of sample fit, we calculate a variety of metrics. The first three, MAE, MASE, and MAPE specifically evaluate forecast accuracy i.e. the prediction accuracy for the time points t=55,...,60. The last one is RMSE which is calculated based on the entire sample to get an idea of wholistic fit. Note that once again, we scale the RMSEs so that they can be interpreted relative to the average number of respiratory related deaths in that cluster. Lastly, we also calculate a Frequentist coverage rate based on the credible intervals produced by INLA to get an idea of our models' uncertainty quantification. 
 
 Mean absolute error (MAE) is a measure of the average size of the mistakes in a collection of predictions, without taking their direction into account
 
@@ -4530,8 +4267,7 @@ for (i in 1:num_clus){
 
 MAE_table = data.frame(MAE_table)
 
-colnames(MAE_table) = c("Cluster 1","Cluster 2","Cluster 3","Cluster 4",
-                         "Cluster 5","Cluster 6","Cluster 7")
+colnames(MAE_table) = c("Cluster 1","Cluster 2")
 rownames(MAE_table) = c("BYM model","LGCP model","Proposed KGR model 1",
                          "Proposed KGR model 2","Proposed KGR model 3",
                          "Proposed KGR model 4","Proposed KGR model 5")
@@ -4572,7 +4308,6 @@ for (i in 1:num_clus){
   pm_5_test = pm_5$mean[54:60]
   pm_6_test = pm_6$mean[54:60]
   pm_7_test = pm_7$mean[54:60] 
-
   actual_test_mean = mean(actual_test)
   
   values1 = c()
@@ -4622,8 +4357,7 @@ for (i in 1:num_clus){
 
 MASE_table = data.frame(MASE_table)
 
-colnames(MASE_table) = c("Cluster 1","Cluster 2","Cluster 3","Cluster 4",
-                         "Cluster 5","Cluster 6","Cluster 7")
+colnames(MASE_table) = c("Cluster 1","Cluster 2")
 rownames(MASE_table) = c("BYM model","LGCP model","Proposed KGR model 1",
                          "Proposed KGR model 2","Proposed KGR model 3",
                          "Proposed KGR model 4","Proposed KGR model 5")
@@ -4683,8 +4417,7 @@ for (i in 1:num_clus){
 
 MAPE_table = data.frame(MAPE_table)
 
-colnames(MAPE_table) = c("Cluster 1","Cluster 2","Cluster 3","Cluster 4",
-                         "Cluster 5","Cluster 6","Cluster 7")
+colnames(MAPE_table) = c("Cluster 1","Cluster 2")
 rownames(MAPE_table) = c("BYM model","LGCP model","Proposed KGR model 1",
                          "Proposed KGR model 2","Proposed KGR model 3",
                          "Proposed KGR model 4","Proposed KGR model 5")
@@ -4692,9 +4425,6 @@ rownames(MAPE_table) = c("BYM model","LGCP model","Proposed KGR model 1",
 MAPE_table
 ```
 
-One way to compare performance between the models fit above is to calculate RMSEs for each model's fit on each cluster's time series. Since INLA makes predictions based on the posterior predictive distribution, I actually calculated two sets of RMSEs. The first one is the RMSE of the predictions made by each model on the observed training data points i.e. not months 67-72. These were the observations that the models were fit on so we would expect small discrepancies between the observed values and the posterior predictive means for those time periods. The second one is the RMSE of the predictions made by each model on the test data points i.e. months 67-72. There was a lot more variation in the RMSEs calculated for these data points obviously.
-
-Another important thing to note here is that the RMSEs calculated for each cluster were drastically different because the population sizes between clusters varied by a lot (think thousands compared to hundred thousands). So in order to make actual comparisons, the RMSEs had to be scaled which involves dividing the calculated RMSE by the average of the actual observed data points. The resulting RMSE values for each cluster, which are presented in tables below, can now be interpreted relative to the average number of respiratory related deaths in that cluster.
 
 ```{r}
 #Overall fit
@@ -4746,8 +4476,7 @@ for (i in 1:num_clus){
 
 test_RMSE_table = data.frame(test_RMSE_table)
 
-colnames(test_RMSE_table) = c("Cluster 1","Cluster 2","Cluster 3","Cluster 4",
-                         "Cluster 5","Cluster 6","Cluster 7")
+colnames(test_RMSE_table) = c("Cluster 1","Cluster 2")
 rownames(test_RMSE_table) = c("BYM model","LGCP model","Proposed KGR model 1",
                          "Proposed KGR model 2","Proposed KGR model 3",
                          "Proposed KGR model 4","Proposed KGR model 5")
@@ -4782,8 +4511,7 @@ coverage
 
 ```{r,warning=FALSE}
 #Plot heatmap for time = 60
-clusterlabels$counties = tolower(clusterlabels$counties)
-
+#clusterlabels$counties = tolower(clusterlabels$counties)
 colnames(clusterlabels) = c("subregion","cluster")
 merged_response = join(ca_map,clusterlabels,by = "subregion")
 
@@ -4791,7 +4519,7 @@ true_values = inla_full_data %>% filter(time == 60) %>% select(id,response)
 colnames(true_values) = c("cluster","response")
 merged_response = join(merged_response,true_values,by = "cluster")
 
-heatmap_limits = c(0,1000)
+heatmap_limits = c(0,2000)
 legend_titles = c("Ref model 2 fitted values","Ref model 3 fitted values","Prop model 1 fitted values",
                   "Prop model 2 fitted values","Prop model 3 fitted values","Prop model 4 fitted values")
 
@@ -4802,7 +4530,7 @@ gg_pop <- ggplot() +
   coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
   scale_fill_viridis_c(limits = heatmap_limits, name = "Observed mortality") +
   theme_void() +
-    labs(title = "Dec 2019",
+    labs(title = "Observed Mortality (Dec 2018) for CA",
          x = "Longitude",
          y = "Latitude")
 
@@ -4836,7 +4564,7 @@ for (i in 1:8){
     coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
     scale_fill_viridis_c(limits = heatmap_limits, name = legend_titles[i]) +
     theme_void() +
-      labs(title = "Dec 2019",
+      labs(title = "Predicted Mean (Dec 2019) for CA",
          x = "Longitude",
          y = "Latitude")
   
@@ -4856,14 +4584,7 @@ legend_titles = c("Ref model 1 variance","Ref model 2 variance","Ref model 3 var
 for (j in 1:8){
   fitted_values = models_intensity_fvs[[j]] %>% filter(time == 60) %>% select(id,sd)
   fitted_values$sd = fitted_values$sd^2
-  
-  if (j == 3){
-    heatmap_limits = c(0,20000)
-  } else{
-    heatmap_limits = c(0,6000)
-  }
-  
-  # heatmap_limits = c(0,8000)
+  heatmap_limits = c(0,1.5*max(fitted_values$sd))
   colname = sprintf("prediction.%s",j)
   colnames(fitted_values) = c("cluster",colname)
   merged_response = join(merged_response,fitted_values,by = "cluster")
@@ -4885,14 +4606,14 @@ for (j in 1:8){
 
 # Sliding timeframe forecasting exercise:
 
-In this section, I implemented a forecasting exercise in which I start with 36 months of training data. I will use that data to estimate a model and then forecast 6 months ahead. Using months 13-36 AND the forecasted values, I will re-estimate the model and forecast again to get the next 6 months. This process continues until the original 36 months of data have been used to produce a complete time series of 60 months (the last 3 years are forecasted). This exercise gives us another way to compare the predictive ability of our various models.
+## One step ahead forecasting
 
-## ONE STEP AHEAD FORECASTING
+In this section, I implemented a forecasting exercise in which I start with 36 months of training data. I will use that data to estimate a model and then forecast one month ahead. Using our starting data AND the forecasted values, I will re-estimate the model and forecast again to get the next month's predictions. This process continues until the original 36 months of data have been used to produce a complete time series of 60 months (the last 3 years are forecasted). This exercise gives us another way to compare the predictive ability of our various models.
 
 ### Reference model 
 
-```{r,warning=FALSE,echo=FALSE,cache=TRUE}
-starting_data = inla_full_data[1:252,] #378 for last 6 months 
+```{r}
+starting_data = inla_full_data[1:72,] #378 for last 6 months 
 starting_data$months = as.numeric(starting_data$months)
 rownames(starting_data) = NULL
 
@@ -4904,27 +4625,21 @@ while(max(starting_data$time) < 60){
   
   ###Attach df for next month with NAs in response
   end = nrow(starting_data)
-  id = c(1:7)
-  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+7)
-  response = rep(NA,7)
-  time = rep(starting_data$time[end]+1,each=7)
-  Intercept1 = c(1,NA,NA,NA,NA,NA,NA)
-  Intercept2 = c(NA,1,NA,NA,NA,NA,NA)
-  Intercept3 = c(NA,NA,1,NA,NA,NA,NA)
-  Intercept4 = c(NA,NA,NA,1,NA,NA,NA)
-  Intercept5 = c(NA,NA,NA,NA,1,NA,NA)
-  Intercept6 = c(NA,NA,NA,NA,NA,1,NA)
-  Intercept7 = c(NA,NA,NA,NA,NA,NA,1)
+  id = c(1,2)
+  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+2)
+  response = rep(NA,2)
+  time = rep(starting_data$time[end]+1,each=2)
+  Intercept1 = c(1,NA)
+  Intercept2 = c(NA,1)
   
   if (starting_data$months[end] == 12){
-    months = rep(1,7)
+    months = rep(1,2)
   } else{
     value = starting_data$months[end]
-    months = rep((value+1),7)
+    months = rep((value+1),2)
   }
   
-  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2,Intercept3,
-                      Intercept4,Intercept5,Intercept6,Intercept7)
+  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2)
   starting_data = rbind(starting_data,new_data)
   starting_data$months = factor(starting_data$months)
   
@@ -4933,8 +4648,7 @@ while(max(starting_data$time) < 60){
   #Can set a fixed initial value for hyperprior if you want to fix hyperparameters
   # prec_prior <- list(prec = list(prior = "loggamma", param = c(0.01,0.01), inital = 2.771018, fixed=TRUE))
   
-  ref_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-    Intercept5 + Intercept6 + Intercept7 + f(id, model = "bym", graph = huge.est) 
+    ref_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + f(id, model = "bym", graph = huge.est) 
     
   ref_model2 = inla(ref_formula2,family = "poisson",data = starting_data,
                   control.compute = list(dic=TRUE,waic=TRUE),
@@ -4945,14 +4659,14 @@ while(max(starting_data$time) < 60){
   preds_ref_model2$mean = round(preds_ref_model2$mean)
   end2 = nrow(preds_ref_model2)
 
-  pred_data = preds_ref_model2$mean[(end2-6):end2]
-  starting_data$response[(end+1):(end+7)] = pred_data
+  pred_data = preds_ref_model2$mean[(end2-1):end2]
+  starting_data$response[(end+1):(end+2)] = pred_data
   
   # starting_data$response = replace(starting_data$response,which(starting_data$response < 0),0)
   starting_data$months = as.numeric(starting_data$months)
   
   ###Calculate performance metrics at each step (avg over all clusters)
-  est_lambda = rep(1,7)
+  est_lambda = rep(1,2)
   
   for (c in 1:num_clus){
   actual = inla_full_data %>% filter(id == c)  %>% data.frame()
@@ -4972,8 +4686,8 @@ while(max(starting_data$time) < 60){
 MASE = c()
 m = 12
 
-est_lambdas_df = rep(1,7)
-pred_test_df = rep(1,7)
+est_lambdas_df = rep(1,2)
+pred_test_df = rep(1,2)
 
 for (j in 36:60){
   for (c in 1:num_clus){
@@ -5001,13 +4715,11 @@ for (j in 2:nrow(pred_test_df)){
   error = (abs(est_lambdas_df[j,] - pred_test_df[j,])) / (abs(est_lambdas_df[j,] - est_lambdas_df[(j-1),])) / (nrow(est_lambdas_df)-1)
   MASE = c(MASE,mean(error))
 }
-```
 
-```{r}
+
 ref_model_error = cbind(MAE,MASE,MAPE,RMSPE)
 ref_model_error
 ```
-
 
 ```{r,warning=FALSE}
 #Plot of posterior predictive estimates (months 37-60) with credible interval bands OVERLAID on response
@@ -5018,7 +4730,6 @@ for (i in 1:num_clus){
   preds = starting_data %>% filter(id == i) 
   colnames(preds)[3] = "mean"
   df = cbind(df,preds)
-  
   title = sprintf("Cluster %s",i)
   
   post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
@@ -5029,13 +4740,13 @@ for (i in 1:num_clus){
 
 ### Proposed model 
 
-```{r,warning=FALSE,echo=FALSE,cache=TRUE}
+```{r,warning=FALSE,cache=TRUE}
 inv_covGP = kgr_model2_outfit$prec
 inv_covGP3 = kgr_model3_outfit$prec
 inv_covGP4 = kgr_model4_outfit$prec
 inv_covGP5 = kgr_model5_outfit$prec
 
-starting_data = inla_full_data[1:252,] #378 for last 6 months 
+starting_data = inla_full_data[1:72,] #378 for last 6 months 
 starting_data$months = as.numeric(starting_data$months)
 rownames(starting_data) = NULL
 
@@ -5047,27 +4758,21 @@ while(max(starting_data$time) < 60){
   
   ###Attach df for next month with NAs in response
   end = nrow(starting_data)
-  id = c(1:7)
-  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+7)
-  response = rep(NA,7)
-  time = rep(starting_data$time[end]+1,each=7)
-  Intercept1 = c(1,NA,NA,NA,NA,NA,NA)
-  Intercept2 = c(NA,1,NA,NA,NA,NA,NA)
-  Intercept3 = c(NA,NA,1,NA,NA,NA,NA)
-  Intercept4 = c(NA,NA,NA,1,NA,NA,NA)
-  Intercept5 = c(NA,NA,NA,NA,1,NA,NA)
-  Intercept6 = c(NA,NA,NA,NA,NA,1,NA)
-  Intercept7 = c(NA,NA,NA,NA,NA,NA,1)
+  id = c(1,2)
+  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+2)
+  response = rep(NA,2)
+  time = rep(starting_data$time[end]+1,each=2)
+  Intercept1 = c(1,NA)
+  Intercept2 = c(NA,1)
   
   if (starting_data$months[end] == 12){
-    months = rep(1,7)
+    months = rep(1,2)
   } else{
     value = starting_data$months[end]
-    months = rep((value+1),7)
+    months = rep((value+1),2)
   }
   
-  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2,Intercept3,
-                      Intercept4,Intercept5,Intercept6,Intercept7)
+  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2)
   starting_data = rbind(starting_data,new_data)
   starting_data$months = factor(starting_data$months)
   
@@ -5077,35 +4782,31 @@ while(max(starting_data$time) < 60){
   prec_prior <- list(prec = list(prior = "loggamma", param = c(0.01,0.01), inital = 2.771018, fixed=TRUE))
   
   # #Proposed model 2
-  # kgr_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-  #  Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP[c(starting_data$id2),c(starting_data$id2)])
+  # kgr_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + f(id,model = "generic0",Cmatrix = inv_covGP[c(starting_data$id2),c(starting_data$id2)])
   # 
-  # kgr_model2 = inla(kgr_formula2, data = starting_data, family = "poisson",
+  # kgr_model2 = inla(kgr_formula2, data = starting_data_subset, family = "poisson",
   #                   control.predictor = list(compute = TRUE, link = 1))
   # 
   # preds_kgr_model = kgr_model2$summary.fitted.values
   
-  #Proposed model 3
-  # kgr_formula3 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-  #  Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP3[c(starting_data$id2),c(starting_data$id2)])
+  # #Proposed model 3
+  # kgr_formula3 = response ~ -1 + months + Intercept1 + Intercept2 + f(id,model = "generic0",Cmatrix = inv_covGP3[c(starting_data$id2),c(starting_data$id2)])
   # 
-  # kgr_model3 = inla(kgr_formula3, data = starting_data, family = "poisson",
+  # kgr_model3 = inla(kgr_formula3, data = starting_data_subset, family = "poisson",
   #                   control.predictor = list(compute = TRUE, link = 1))
   # 
   # preds_kgr_model = kgr_model3$summary.fitted.values
   
   # #Proposed model 4
-  kgr_formula4 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
-   Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP4[c(starting_data$id2),c(starting_data$id2)])
+  kgr_formula4 = response ~ -1 + months + Intercept1 + Intercept2 + f(id,model = "generic0",Cmatrix = inv_covGP4[c(starting_data$id2),c(starting_data$id2)])
 
   kgr_model4 = inla(kgr_formula4, data = starting_data, family = "poisson",
                     control.predictor = list(compute = TRUE, link = 1))
 
   preds_kgr_model = kgr_model4$summary.fitted.values
   
-  # #Proposed model 5
-  # kgr_formula5 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-  #   Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP5[c(starting_data$id2),c(starting_data$id2)], hyper = prec_prior)
+  #Proposed model 5
+  # kgr_formula5 = response ~ -1 + months + Intercept1 + Intercept2 + f(id,model = "generic0",Cmatrix = inv_covGP5[c(starting_data$id2),c(starting_data$id2)], hyper = prec_prior)
   # 
   # kgr_model5 = inla(kgr_formula5, data = starting_data, family = "poisson",
   #                   control.inla = list(strategy = "laplace"),
@@ -5117,14 +4818,14 @@ while(max(starting_data$time) < 60){
   preds_kgr_model$mean = round(preds_kgr_model$mean)
   end2 = nrow(preds_kgr_model)
 
-  pred_data = preds_kgr_model$mean[(end2-6):end2]
-  starting_data$response[(end+1):(end+7)] = pred_data
+  pred_data = preds_kgr_model$mean[(end2-1):end2]
+  starting_data$response[(end+1):(end+2)] = pred_data
   
   # starting_data$response = replace(starting_data$response,which(starting_data$response < 0),0)
   starting_data$months = as.numeric(starting_data$months)
   
   ###Calculate performance metrics at each step (avg over all clusters)
-  est_lambda = rep(1,7)
+  est_lambda = rep(1,2)
   
   for (c in 1:num_clus){
   actual = inla_full_data %>% filter(id == c)  %>% data.frame()
@@ -5144,8 +4845,8 @@ while(max(starting_data$time) < 60){
 MASE2 = c()
 m = 12
 
-est_lambdas_df = rep(1,7)
-pred_test_df = rep(1,7)
+est_lambdas_df = rep(1,2)
+pred_test_df = rep(1,2)
 
 for (j in 36:60){
   for (c in 1:num_clus){
@@ -5173,9 +4874,7 @@ for (j in 2:nrow(pred_test_df)){
   error = (abs(est_lambdas_df[j,] - pred_test_df[j,])) / (abs(est_lambdas_df[j,] - est_lambdas_df[(j-1),])) / (nrow(est_lambdas_df)-1)
   MASE2 = c(MASE2,mean(error))
 }
-```
 
-```{r}
 prop_model_error = cbind(MAE2,MASE2,MAPE2,RMSPE2)
 prop_model_error
 ```
@@ -5190,7 +4889,6 @@ for (i in 1:num_clus){
   preds = starting_data %>% filter(id == i) 
   colnames(preds)[3] = "mean"
   df = cbind(df,preds)
-  
   title = sprintf("Cluster %s",i)
   
   post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + 
@@ -5198,6 +4896,7 @@ for (i in 1:num_clus){
   print(post_pred_plot)
 }
 ```
+
 
 Grouped barplot for each error metric over 24 time points
 
@@ -5232,12 +4931,14 @@ ggplot(data_long, aes(x = factor(Time), y = Value, fill = Source)) +
 ```
 
 
-## 6 month sliding window
+## 6 month sliding window forecast
+
+In this section, I implemented a forecasting exercise in which I start with 36 months of training data. I will use that data to estimate a model and then forecast 6 months ahead. Now, we slide the time window of interest and use months 7-36 AND the newly forecasted values to re-estimate the model and forecast again to get the next 6 months. This process continues until the original 36 months of data have been used to produce a complete time series of 60 months (the last 3 years are forecasted). This exercise gives us another way to compare the predictive ability of our various models.
 
 ### Reference model iteration
 
 ```{r,cache=TRUE}
-starting_data = inla_full_data[1:252,]
+starting_data = inla_full_data[1:72,]
 starting_data$months = as.numeric(starting_data$months)
 rownames(starting_data) = NULL
 
@@ -5245,31 +4946,28 @@ while(max(starting_data$time) < 60){
   
   ###Attach df for next 6 months with NAs in response
   end = nrow(starting_data)
-  id = rep(1:7,6)
-  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+42)
-  response = rep(NA,42)
-  time = rep((starting_data$time[end]+1):(starting_data$time[end]+6),each=7)
-  Intercept1 = rep(c(1,NA,NA,NA,NA,NA,NA),6)
-  Intercept2 = rep(c(NA,1,NA,NA,NA,NA,NA),6)
-  Intercept3 = rep(c(NA,NA,1,NA,NA,NA,NA),6)
-  Intercept4 = rep(c(NA,NA,NA,1,NA,NA,NA),6)
-  Intercept5 = rep(c(NA,NA,NA,NA,1,NA,NA),6)
-  Intercept6 = rep(c(NA,NA,NA,NA,NA,1,NA),6)
-  Intercept7 = rep(c(NA,NA,NA,NA,NA,NA,1),6)
+  id = rep(1:2,6)
+  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+12)
+  response = rep(NA,12)
+  time = rep((starting_data$time[end]+1):(starting_data$time[end]+6),each=2)
+  Intercept1 = rep(c(1,NA),6)
+  Intercept2 = rep(c(NA,1),6)
   
   if (starting_data$months[end] == 6){
-    months = rep(c(7,8,9,10,11,12),each=7)
+    months = rep(c(7,8,9,10,11,12),each=2)
   } else if (starting_data$months[end] == 12){
-    months = rep(c(1,2,3,4,5,6),each=7)
+    months = rep(c(1,2,3,4,5,6),each=2)
   }
   
-  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2,Intercept3,
-                        Intercept4,Intercept5,Intercept6,Intercept7)
+  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2)
   starting_data = rbind(starting_data,new_data)
   starting_data$months = factor(starting_data$months)
   
-  ref_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + Intercept5 + Intercept6 + Intercept7 + f(id, model = "bym", graph = huge.est) 
-  ref_model2 = inla(ref_formula2,family = "poisson",data = starting_data,
+  ###Fit KGR model on most recent 36 months
+  starting_data_subset = starting_data[(nrow(starting_data)-83):end,]
+  
+  ref_formula2 = response ~ months + f(id, model = "bym", graph = huge.est) 
+  ref_model2 = inla(ref_formula2,family = "poisson",data = starting_data_subset,
                   control.compute = list(dic=TRUE,waic=TRUE),
                   control.predictor = list(compute = TRUE, link = 1))
   
@@ -5279,8 +4977,8 @@ while(max(starting_data$time) < 60){
 
   end2 = nrow(preds_ref_model2)
 
-  pred_data = preds_ref_model2$mean[(end2-41):end2]
-  starting_data$response[(end+1):(end+42)] = pred_data
+  pred_data = preds_ref_model2$mean[(end2-11):end2]
+  starting_data$response[(end+1):(end+12)] = pred_data
 
   starting_data$months = as.numeric(starting_data$months)
 }
@@ -5310,7 +5008,7 @@ inv_covGP3 = kgr_model3_outfit$prec
 inv_covGP4 = kgr_model4_outfit$prec
 inv_covGP5 = kgr_model5_outfit$prec
 
-starting_data = inla_full_data[1:252,]
+starting_data = inla_full_data[1:72,]
 starting_data$months = as.numeric(starting_data$months)
 rownames(starting_data) = NULL
 
@@ -5318,35 +5016,28 @@ while(max(starting_data$time) < 60){
   
   ###Attach df for next 6 months with NAs in response
   end = nrow(starting_data)
-  id = rep(1:7,6)
-  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+42)
-  response = rep(NA,42)
-  time = rep((starting_data$time[end]+1):(starting_data$time[end]+6),each=7)
-  Intercept1 = rep(c(1,NA,NA,NA,NA,NA,NA),6)
-  Intercept2 = rep(c(NA,1,NA,NA,NA,NA,NA),6)
-  Intercept3 = rep(c(NA,NA,1,NA,NA,NA,NA),6)
-  Intercept4 = rep(c(NA,NA,NA,1,NA,NA,NA),6)
-  Intercept5 = rep(c(NA,NA,NA,NA,1,NA,NA),6)
-  Intercept6 = rep(c(NA,NA,NA,NA,NA,1,NA),6)
-  Intercept7 = rep(c(NA,NA,NA,NA,NA,NA,1),6)
+  id = rep(1:2,6)
+  id2 = (starting_data$id2[end]+1):(starting_data$id2[end]+12)
+  response = rep(NA,12)
+  time = rep((starting_data$time[end]+1):(starting_data$time[end]+6),each=2)
+  Intercept1 = rep(c(1,NA),6)
+  Intercept2 = rep(c(NA,1),6)
   
   if (starting_data$months[end] == 6){
-    months = rep(c(7,8,9,10,11,12),each=7)
+    months = rep(c(7,8,9,10,11,12),each=2)
   } else if (starting_data$months[end] == 12){
-    months = rep(c(1,2,3,4,5,6),each=7)
+    months = rep(c(1,2,3,4,5,6),each=2)
   }
   
-  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2,Intercept3,
-                      Intercept4,Intercept5,Intercept6,Intercept7)
+  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2)
   starting_data = rbind(starting_data,new_data)
   starting_data$months = factor(starting_data$months)
   
-  
   ###Fit KGR model on most recent 36 months
-  starting_data_subset = starting_data[(nrow(starting_data)-293):end,]
+  starting_data_subset = starting_data[(nrow(starting_data)-83):end,]
   
   # #Proposed model 2
-  # kgr_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP[c(starting_data_subset$id2),c(starting_data_subset$id2)])
+  # kgr_formula2 = response ~ f(id,model = "generic0",Cmatrix = inv_covGP[c(starting_data_subset$id2),c(starting_data_subset$id2)])
   # 
   # kgr_model2 = inla(kgr_formula2, data = starting_data_subset, family = "poisson",
   #                   control.predictor = list(compute = TRUE, link = 1))
@@ -5354,7 +5045,7 @@ while(max(starting_data$time) < 60){
   # preds_kgr_model = kgr_model2$summary.fitted.values
   
   # #Proposed model 3
-  # kgr_formula3 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP3[c(starting_data_subset$id2),c(starting_data_subset$id2)])
+  # kgr_formula3 = response ~ f(id,model = "generic0",Cmatrix = inv_covGP3[c(starting_data_subset$id2),c(starting_data_subset$id2)])
   # 
   # kgr_model3 = inla(kgr_formula3, data = starting_data_subset, family = "poisson",
   #                   control.predictor = list(compute = TRUE, link = 1))
@@ -5362,7 +5053,7 @@ while(max(starting_data$time) < 60){
   # preds_kgr_model = kgr_model3$summary.fitted.values
   
   # #Proposed model 4
-  # kgr_formula4 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP4[c(starting_data_subset$id2),c(starting_data_subset$id2)])
+  # kgr_formula4 = response ~ f(id,model = "generic0",Cmatrix = inv_covGP4[c(starting_data_subset$id2),c(starting_data_subset$id2)])
   # 
   # kgr_model4 = inla(kgr_formula4, data = starting_data_subset, family = "poisson",
   #                   control.predictor = list(compute = TRUE, link = 1))
@@ -5370,7 +5061,7 @@ while(max(starting_data$time) < 60){
   # preds_kgr_model = kgr_model4$summary.fitted.values
   
   #Proposed model 5
-  kgr_formula5 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + Intercept5 + Intercept6 + Intercept7 + f(id,model = "generic0",Cmatrix = inv_covGP5[c(starting_data_subset$id2),c(starting_data_subset$id2)])
+  kgr_formula5 = response ~ f(id,model = "generic0",Cmatrix = inv_covGP5[c(starting_data_subset$id2),c(starting_data_subset$id2)])
 
   kgr_model5 = inla(kgr_formula5, data = starting_data_subset, family = "poisson",
                     control.predictor = list(compute = TRUE, link = 1))
@@ -5382,14 +5073,13 @@ while(max(starting_data$time) < 60){
   preds_kgr_model$mean = round(preds_kgr_model$mean)
   end2 = nrow(preds_kgr_model)
 
-  pred_data = preds_kgr_model$mean[(end2-41):end2]
-  starting_data$response[(end+1):(end+42)] = pred_data
+  pred_data = preds_kgr_model$mean[(end2-11):end2]
+  starting_data$response[(end+1):(end+12)] = pred_data
   
   # starting_data$response = replace(starting_data$response,which(starting_data$response < 0),0)
   starting_data$months = as.numeric(starting_data$months)
 }
 ```
-
 
 ```{r,warning=FALSE}
 #Plot of posterior predictive estimates (months 37-60) with credible interval bands OVERLAID on response
@@ -5406,5 +5096,3 @@ for (i in 1:num_clus){
   print(post_pred_plot)
 }
 ```
-
-
