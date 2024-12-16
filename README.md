@@ -1,4 +1,4 @@
-# causalKGR
+# KGR-SKATER
 Code for implementing spatially clustered kernel graph regression with INLA for high dimensional data (with causal inference extensions)
 
 The main research question being addressed here is: What is the effect of wildfires on respiratory related comorbidities each day following significant wildfires in California? 
