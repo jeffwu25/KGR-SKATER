@@ -1,0 +1,419 @@
+---
+title: "HUGE simulations 2"
+author: "Jeffrey Wu"
+date: "2023-10-04"
+output: html_document
+---
+
+## PRELIMINARY STUFF:
+
+Load all relevant packages:
+
+```{r,warning=FALSE,echo=FALSE}
+library(dplyr) 
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(zoo)
+library(ggplot2)
+library(urbnmapr)
+library(devtools)
+library(readxl)
+library(spdep)
+library(sp)
+library(huge)
+library(INLA)
+library(HMMpa)
+library(invgamma)
+library(brinla)
+library(reshape2)
+library(patchwork)
+library(jsonlite)
+library(geosphere)
+library(urbnmapr)
+library(RAQSAPI)
+library(con2aqi)
+library(pscl)
+
+load("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/Workspace9.11.RData")
+```
+
+Loading and (quickly cleaning) all necessary datasets: 
+
+```{r,message=FALSE,cache=TRUE}
+###SoA data
+soa.data = read_xlsx("SoA.data.1019.xlsx")
+
+###county_flips are unique identifier for counties
+soa.data$county_fips = as.character(soa.data$county_fips) ##change it to character
+
+#IMPORTANT
+
+# This shape file contains the coordinates for county boundaries
+##counties is from urbanmap
+
+CA.counties = urbnmapr::counties %>% filter(state_abbv == "CA")
+
+CA.counties2 = read.csv("counties.ca.data.csv")
+ca.coordinates = data.frame(CA.counties2$county,CA.counties2$lat,CA.counties2$lng)
+colnames(ca.coordinates) = c("county","lat","long")
+
+ca.coordinates = ca.coordinates[order(ca.coordinates$county),]
+row.names(ca.coordinates) = NULL
+
+
+###IF WE WANT TO BOIL DOWN TIME SERIES AND KEEP ALL DATA, SWITCH to CA_newdata below
+soa_joint <- left_join(CA.counties, soa.data, by = "county_fips")
+
+#Use with soa.data (full data)
+CA_data = soa_joint %>% select(long, lat, county_name.y, Year, Score, Total_Pop,
+                               EDUC_Lessthan9, EDUC_college, White_Collar,
+                               Unemployment_Rate, Adj_HH_income, Income_Disparity,
+                               Individuals_Below_Poverty, Median_Home_Value,
+                               Median_Gross_Rent, Housing_No_Telephone,
+                               Housing_Incomplete_Plumbing)
+
+colnames(CA_data)[3] = "County"
+
+CA_newdata = soa.data[1:58,]
+CA_newdata = CA_newdata[,-c(4,7,8)]
+
+
+###Cal-ViDa data
+mortality = read_xlsx("RespiratoryMortality1423.xlsx")
+mortality = filter(mortality,Cause_of_Death %in% c("Chronic lower respiratory diseases","Influenza and pneumonia"))
+mortality = filter(mortality,Year_of_Death < 2020)
+
+Population = rep(100000,nrow(mortality))
+mortality = cbind(mortality,Population)
+```
+
+
+## SKATER clustering
+
+```{r,echo=FALSE}
+###Setting up SPDF for CA counties 
+CA_sf = st_read(getwd(),"CA_Counties_TIGER2016")
+CA_spdf = as_Spatial(CA_sf)
+
+score_scaled = scale(CA_data$Score)
+#unemploy_scaled = scale(CA_data$Unemployment_Rate)
+
+#covariates_scale = data.frame(apply(CA_data[,4:16],2,scale))
+covariates_scale = data.frame(score_scaled)
+
+CA_spdf@data = covariates_scale
+```
+
+```{r}
+#Identify neighborhood list for counties 
+CA_nb = poly2nb(CA_spdf)
+
+#summary(CA_nb)
+
+# plot(CA_spdf, main = "With queen")
+# plot(CA_nb, coords = coordinates(CA_spdf), col="blue", add = TRUE)
+
+#Calculate edge costs (dissimilarity matrix) based on Euclidean distance 
+costs <- nbcosts(CA_nb, data = covariates_scale)
+
+###Get adjacency matrix using nb2mat() (SEPARATE STEP FOR INLA)
+adj = nb2mat(CA_nb,style = "B")
+
+#Transform edge costs to spatial weights 
+ct_w <- nb2listw(CA_nb,costs,style="B")
+
+#Create minimum spanning tree 
+ct_mst <- mstree(ct_w)
+
+plot(ct_mst,coordinates(CA_spdf),col="blue", cex.lab=0.5)
+plot(CA_spdf, add=TRUE)
+
+#Run SKATER algorithm to get 5 contiguous clusters (cluster idx is in order of CA_sf)
+clus5 <- skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 4)
+
+#Add a min population constraint
+clus5_min <- skater(edges = ct_mst[,1:2], 
+                     data = covariates_scale, 
+                     crit = 5000000, 
+                     vec.crit = CA_data$Total_Pop,
+                     ncuts = 4)
+
+#Add a minimum number of areas in each cluster constraint 
+clus5_minarea = skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 4, 8)
+
+
+CA_data_cluster = (CA_sf %>% mutate(clus = clus5_min$groups))
+
+#Plot clustered CA
+plot((CA_sf %>% mutate(clus = clus5$groups))['clus'], main = "5 cluster example")
+
+plot((CA_sf %>% mutate(clus = clus5_min$groups))['clus'], main = "5 cluster example with population constraint")
+
+plot((CA_sf %>% mutate(clus = clus5_minarea$groups))['clus'], main = "5 cluster example with minimum number of areas constraint")
+
+
+
+#plot(CA_sf,col=c("red","green","blue","purple","yellow")[clus5_min$groups],max.plot=17)
+```
+
+### Graph estimation
+
+```{r,cache = FALSE}
+#Aggregate feature vectors into one vector for each SKATER cluster
+CA_cluster = data.frame(CA_sf$NAMELSAD,clus5$groups)
+names(CA_cluster) = c("County","Cluster")
+year = 2010:2019
+
+CA_cluster = left_join(CA_cluster,CA_data,by = "County")
+
+cluster1 = CA_cluster %>% filter(Cluster == 1)
+cluster2 = CA_cluster %>% filter(Cluster == 2)
+cluster3 = CA_cluster %>% filter(Cluster == 3)
+cluster4 = CA_cluster %>% filter(Cluster == 4)
+cluster5 = CA_cluster %>% filter(Cluster == 5)
+
+#Get weighted avg value for Score for each cluster for each year 
+#Create new data matrix of aggregated feature vectors 
+cluster_features = matrix(NA,nrow = 10,ncol = 5)
+
+for (i in 1:5){
+  cluster = CA_cluster %>% filter(Cluster == i)
+
+  for(j in 1:10){
+    #Obtain a weighted mean based on population
+    vec = cluster %>% filter(Year == year[j]) %>% select(Score,Total_Pop) %>% unique()
+    cluster.pop = sum(vec$Total_Pop)
+    cluster.popweights = vec$Total_Pop/cluster.pop
+    cluster_features[j,i] = weighted.mean(vec$Score,cluster.popweights)
+  }
+}
+```
+
+
+## METHOD 1: CALCULATE PARTIAL CORRELATIONS W LINEAR REGRESSION (MOST BASIC)
+
+```{r}
+v1 = cluster_features[,1]
+v2 = cluster_features[,2]
+v3 = cluster_features[,3]
+v4 = cluster_features[,4]
+v5 = cluster_features[,5]
+
+#Regress on clus1
+lm1 = lm(v1 ~ v2 + v3 + v4 + v5)
+r1 = lm1$residuals
+
+#Regress on clus2
+lm2 = lm(v2 ~ v1 + v3 + v4 + v5)
+r2 = lm2$residuals
+
+#Regress on clus3
+lm3 = lm(v3 ~ v1 + v2 + v4 + v5)
+r3 = lm3$residuals
+
+#Regress on clus4
+lm4 = lm(v4 ~ v1 + v2 + v3 + v5)
+r4 = lm4$residuals
+
+#Regress on clus5
+lm5 = lm(v5 ~ v1 + v2 + v3 + v4)
+r5 = lm5$residuals
+
+#Calculate correlations between residuals (to see which edges are present, lets say cutoff of 0.3)
+edge12 = cor(r1,r2)
+edge13 = cor(r1,r3)
+edge14 = cor(r1,r4)
+edge15 = cor(r1,r5)
+
+edge23 = cor(r2,r3)
+edge24 = cor(r2,r4)
+edge25 = cor(r2,r5)
+
+edge34 = cor(r3,r4)
+edge35 = cor(r3,r5)
+
+edge45 = cor(r4,r5)
+
+pccs = c(edge12,edge13,edge14,edge15,edge23,edge24,edge25,edge34,edge35,edge45)
+pccs
+which(abs(pccs) >= 0.3)
+```
+
+TAKEAWAYS: 
+- Looks like edges should be present
+- HUGE sparsity penalty is making all the edges go away? Bc it's supposed to be for high dimensional data
+- Node 1 has edges with: 2,3,4
+- Node 2 has edges with 3,4,5
+- Node 5 has edges with 3,4
+
+
+## METHOD 2: HUGE (MB)
+
+```{r}
+out.mb = huge(cluster_features,lambda = 0.25,method="mb")
+
+mb.stars = huge.select(out.mb,criterion = "stars",stars.thresh = 0.1)
+mb.ric = huge.select(out.mb,criterion = "ric")
+
+plot(mb.stars)
+plot(mb.ric)
+```
+Note: 
+- MB doesn't allow for EBIC selection (default is RIC btw) 
+
+
+## METHOD 3: HUGE (CT)
+
+```{r}
+out.ct = huge(cluster_features,lambda = 0.25,method="ct")
+
+ct.stars = huge.select(out.ct,criterion = "stars",stars.thresh = 0.1)
+ct.ric = huge.select(out.ct,criterion = "ric")
+
+plot(ct.stars)
+plot(ct.ric)
+```
+
+## METHOD 4: HUGE (TIGER)
+
+```{r}
+out.tiger = huge(cluster_features,lambda = 0.25,method="tiger")
+
+# tiger.stars = huge.select(out.tiger,criterion = "stars",stars.thresh = 0.1)
+tiger.ric = huge.select(out.tiger,criterion = "ric")
+
+# plot(tiger.stars)
+plot(tiger.ric)
+```
+
+## METHOD 5: HUGE (GLASSO)
+
+```{r}
+out.glasso = huge(cluster_features,lambda = 0.25,method="glasso")
+
+glasso.stars = huge.select(out.glasso,criterion = "stars",stars.thresh = 0.1)
+glasso.ric = huge.select(out.glasso,criterion = "ric")
+glasso.ebic = huge.select(out.glasso,criterion = "ebic")
+
+plot(glasso.stars)
+plot(glasso.ric)
+plot(glasso.ebic)
+```
+
+FIRST EXPERIMENT: BOOTSTRAP CLUSTER_FEATURES AND ESTIMATE GRAPH MANY TIMES (SAME LAMBDA , USE EBIC)
+
+```{r}
+sample.idx = round(runif(100,1,10))
+cluster_features_boot = cluster_features[sample.idx,]
+
+#Use Sang's robust selection function to choose best regularization parameter for glasso
+library(robsel)
+lambda.boot = robsel(t(cluster_features_boot),alpha=0.95,B=200)
+
+icov_list_stars = list()
+icov_list_ric = list()
+icov_list_ebic = list()
+
+for (i in 1:10){
+  out.glasso = huge(cluster_features_boot,lambda=0.75,method="glasso")
+  
+  glasso.stars = huge.select(out.glasso,criterion = "stars",stars.thresh = 0.1)
+  glasso.ric = huge.select(out.glasso,criterion = "ric")
+  glasso.ebic = huge.select(out.glasso,criterion = "ebic")
+  
+  icov_list_stars[[i]] = glasso.stars$icov[[1]]
+  icov_list_ric[[i]] = glasso.ric$icov[[1]]
+  icov_list_ebic[[i]] = glasso.ebic$icov[[1]]
+}
+
+length(unique(icov_list_stars))
+length(unique(icov_list_ric))
+unique(icov_list_ebic)
+
+# compare_vec = rep(NA,10)
+# for (j in 1:9){
+#   compare_vec[j] = (icov_list_ebic[[j]] == icov_list_ebic[[j+1]])
+# }
+```
+
+
+TAKEAWAYS: 
+- boostrap to 1000 observations for each cluster -> RIC, EBIC, and STARS all give the same precision matrices (diagonal matrix), every single iteration 
+- boostrap to 100 observations for each cluster (diagonal too) -> still same (for all criterion)
+- ABOVE WERE DONE WITH LAMBDA.BOOT
+- Seems like any lambda >= 1 estimates a disconnected graph
+- Lambda = 0.5 -> one unique graph -> has edges e.g. row 1: 0.77964506 -0.1989827 -0.1564404  0 -0.06599932
+- Lambda = 0.75 -> one unique graph -> has edges (one less edge than lambda = 0.5) e.g. row 1: 0.58517735 -0.06935141 -0.04938755  0 0
+- Lambda = 1 -> 0.5 on the diagonals
+- Lambda = 2 -> 0.333 on the diagonals 
+- Lambda = 3 -> 0.25 on the diagonals 
+- Lambda = 4 -> 0.2
+- lambda.boot = 4.87 -> 0.17 on the diagonals
+
+
+SECOND EXPERIMENT: COMPARE EBIC ESTIMATES BASED ON DIFFERENT TUNING PARAMETER
+
+```{r}
+#gamma has to be between 0 and 1
+gamma_grid = seq(0,1,0.1)
+
+icov_list_ebic = list()
+
+for (i in 1:11){
+  out.glasso = huge(cluster_features,lambda=0.8,method="glasso")
+  
+  glasso.ebic = huge.select(out.glasso,criterion = "ebic",ebic.gamma = gamma_grid[i])
+  icov_list_ebic[[i]] = glasso.ebic$icov[[1]]
+}
+
+unique(icov_list_ebic)
+```
+
+
+TAKEAWAYS: 
+- Over grid of potential gamma values, estimated precision matrix remains the same 
+- Different values of lambda give different graphs (obv) e.g. 0.5 vs 0.8 produces same graph structure but different precision matrices
+- For each lambda value, still estimates same precision matrix for different values of gamma
+
+
+THIRD EXPERIMENT: TOGGLE STARS PARAMETERS (THRESHOLD, GRID OF LAMBDA, NUMBER OF SUBSAMPLES)
+
+```{r}
+#stars.thresh (prob < 1?)
+test = seq(0.05,0.5,0.05)
+
+#stars.subsample.ratio (default is 0.8 for small sample size)
+test = seq(0.2,0.9,0.1)
+
+#rep.num (default is 20)
+test = seq(10,100,10)
+
+icov_list_stars = list()
+
+for (i in 1:10){
+  out.glasso = huge(cluster_features,lambda=0.8,method="glasso")
+  
+  glasso.stars = huge.select(out.glasso,criterion = "stars",stars.thresh = test[i])
+  icov_list_stars[[i]] = glasso.stars$icov[[1]]
+}
+
+unique(icov_list_stars)
+```
+
+
+TAKEAWAYS: 
+- Rep nums from 10-100: gives same precision matrix (lambda = 0.8)
+- Stars.subsample.ratio from 0.2-0.9: gives same precision matrix (lambda = 0.8)
+- Stars.thresh from 0.05-0.5: gives same precision matrix (lambda = 0.8)
+- Same unique precision matrix each time... kinda sus? 
+
+
+OVERALL TAKEAWAYS: 
+- Seems like most important factor is initial lambda value (regularization parameter)
+- Anything >= 1 leads to disconnected graph (what's interpretation wrt glasso formula)
+- STARs and EBIC agree exactly when lambda matches up (so I guess lambda values being selected from the grid is different for those to criterion if not specified) 
+- When lambda is close to 1, all the methods basically agree, bc they agree on sparsity basically 
+- But with smaller penalty (I did 0.95 -> 0.75 -> 0.5 -> 0.25), there is a little bit more variation across estimated graph structures
+- The smaller the value of lambda, the more variation across methods (wrt selection method... RIC always empty, STARS predicts something which agrees w EBIC when applicable)
+
