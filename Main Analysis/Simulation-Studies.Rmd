@@ -793,7 +793,7 @@ upper2$`0.975quant` - lower2$`0.025quant`
 # Simulation study 2: can just load synthetic-study2-results.Rdata
 
 ```{r}
-set.seed(5)
+set.seed(101) #101 used in the paper 
 
 #Make a synthetic adj matrix
 row1 = c(0,0,0,0,0)
@@ -975,21 +975,69 @@ true_mortality = synth_inla_data
 true_mortality$time = as.numeric(true_mortality$time)
 
 #Combine plots with library patchwork
-true1 = true_mortality %>% filter(id == 1) %>% ggplot(aes(x=time,y=response)) + geom_line()
+true1 = true_mortality %>% filter(id == 1) %>% ggplot(aes(x=time,y=response)) + geom_line() + ggtitle("Cluster 1") + theme_classic()
 
-true2 = true_mortality %>% filter(id == 2) %>% ggplot(aes(x=time,y=response)) + geom_line() 
+true2 = true_mortality %>% filter(id == 2) %>% ggplot(aes(x=time,y=response)) + geom_line() + ggtitle("Cluster 2") + theme_classic()
 
-true3 = true_mortality %>% filter(id == 3) %>% ggplot(aes(x=time,y=response)) + geom_line() 
+true3 = true_mortality %>% filter(id == 3) %>% ggplot(aes(x=time,y=response)) + geom_line() + ggtitle("Cluster 3") + theme_classic()
 
-true4 = true_mortality %>% filter(id == 4) %>% ggplot(aes(x=time,y=response)) + geom_line() 
+true4 = true_mortality %>% filter(id == 4) %>% ggplot(aes(x=time,y=response)) + geom_line() + ggtitle("Cluster 4") + theme_classic()
 
-true5 = true_mortality %>% filter(id == 5) %>% ggplot(aes(x=time,y=response)) + geom_line()
+true5 = true_mortality %>% filter(id == 5) %>% ggplot(aes(x=time,y=response)) + geom_line() + ggtitle("Cluster 5") + theme_classic()
 
 true1 + true2 + true3 + true4 + true5
+
+
+
+
+
+
+plot_list = list()
+
+for (i in 1:5){
+  title = sprintf("Cluster %s",i)
+  
+  true = true_mortality %>% filter(id == i) %>% ggplot(aes(x=time,y=response)) + geom_line() + ggtitle(title) +
+    xlab("Month") + ylab("Intensity") + theme_classic(base_size = 14)
+  
+  plot_list[[i]] = true
+}
+
+combined = wrap_plots(plotlist = plot_list, ncol = 3)
+combined
+
+# save one combined figure
+ggsave(
+  filename = "synth2-ts-combined.png",
+  plot = combined,
+  path = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/Paper1-images/plos1-figs/",
+  width = 12,
+  height = 8,
+  dpi = 600
+)
 ```
 
   
 ## Fit ref model 2
+
+```{r}
+poisson_pp_sampling = function(inla_fvs,n=100000){
+  inla_fvs$y_ppmean = NA
+  inla_fvs$y_pplower = NA
+  inla_fvs$y_ppupper = NA
+  
+  for(i in 1:nrow(inla_fvs)){
+    pp_samples = rpois(n,inla_fvs$mean[i])
+    
+    inla_fvs$y_ppmean[i] = mean(pp_samples)
+    inla_fvs$y_pplower[i] = quantile(pp_samples,0.025)
+    inla_fvs$y_ppupper[i] = quantile(pp_samples,0.975)
+  }
+    
+  return(inla_fvs)  
+}
+```
+
 
 ```{r}
 ref_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + Intercept5  + 
@@ -1000,20 +1048,52 @@ model = inla(formula = ref_formula2,family = "poisson",
               control.compute = list(dic=TRUE,waic=TRUE),
               control.inla = list(strategy = "laplace"),
               control.predictor = list(compute = TRUE, link = 1))
+
+preds_model = model$summary.fitted.values
+preds_model <- cbind(synth_inla_outsample_data$id, synth_inla_outsample_data$time, preds_model)
+colnames(preds_model) <- c("id", "time", "mean", "sd", "0.025quant", "0.5quant", "0.975quant", "mode")
 ```
 
 ```{r}
+plot_list = list()
+
 for (i in 1:5){
-  df = synth_inla_data %>% filter(id == i) %>% select(response,time)
-  preds = model$summary.fitted.values %>% filter(id == i) 
-  df = cbind(df,preds)
+  response = synth_inla_data %>% filter(id == i) %>% select(response)
+  preds = preds_model %>% filter(id == i) 
+  df = cbind(response,preds)
   df$mean = round(df$mean)
   
-  title = sprintf("Posterior Predictive Fits for Cluster %s",i)
+  df$y_ppmean = NA
+  df$y_pplower = NA
+  df$y_ppupper = NA
   
-  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + geom_vline(xintercept = 240,linetype = "dashed",color = "blue",linewidth = 1.5)
-  print(post_pred_plot)
+  for(j in 1:nrow(df)){
+    pp_samples = rpois(100,df$mean[j])
+    
+    df$y_ppmean[j] = mean(pp_samples)
+    df$y_pplower[j] = quantile(pp_samples,0.025)
+    df$y_ppupper[j] = quantile(pp_samples,0.975)
   }
+  
+  title = sprintf("Cluster %s",i)
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + geom_vline(xintercept = 240,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + xlab("Month") + ylab("Intensity") + theme_classic(base_size = 14)
+  
+  print(post_pred_plot)
+  plot_list[[i]] = post_pred_plot
+}
+
+# combined = wrap_plots(plotlist = plot_list, ncol = 3)
+# 
+# # Save one combined figure
+# ggsave(
+#   filename = "synth2-ref-outsample-combined.png",
+#   plot = combined,
+#   path = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/Paper1-images/plos1-figs",
+#   width = 15,
+#   height = 13,
+#   dpi = 600
+# )
 ```
 
 ## Fit prop model 1
@@ -1051,47 +1131,383 @@ inla_model = inla(formula = kgr_formula1,family = "poisson",data = synth_inla_ou
                 control.predictor = list(compute = TRUE, link = 1))
 
 inla_model$summary.fixed
+
+preds_model2 = inla_model$summary.fitted.values
+preds_model2 <- cbind(synth_inla_outsample_data$id, synth_inla_outsample_data$time, preds_model2)
+colnames(preds_model2) <- c("id", "time", "mean", "sd", "0.025quant", "0.5quant", "0.975quant", "mode")
 ```
 
-
 ```{r}
+plot_list = list()
+
 for (i in 1:5){
-  df = synth_inla_data %>% filter(id == i) %>% select(response,time)
-  preds = inla_model$summary.fitted.values %>% filter(id == i) 
-  df = cbind(df,preds)
+  response = synth_inla_data %>% filter(id == i) %>% select(response)
+  preds = preds_model2 %>% filter(id == i) 
+  df = cbind(response,preds)
   df$mean = round(df$mean)
   
-  title = sprintf("Posterior Predictive Fits for Cluster %s",i)
-  
-  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + geom_vline(xintercept = 240,linetype = "dashed",color = "blue",linewidth = 1.5)
-  print(post_pred_plot)
+  df$y_ppmean = NA
+  df$y_pplower = NA
+  df$y_ppupper = NA
+
+  for(j in 1:nrow(df)){
+    pp_samples = rpois(100,df$mean[j])
+
+    df$y_ppmean[j] = mean(pp_samples)
+    df$y_pplower[j] = quantile(pp_samples,0.025)
+    df$y_ppupper[j] = quantile(pp_samples,0.975)
   }
+  
+  title = sprintf("Cluster %s",i)
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + geom_vline(xintercept = 240,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + xlab("Month") + ylab("Intensity") + theme_classic(base_size = 14)
+  
+  print(post_pred_plot)
+  plot_list[[i]] = post_pred_plot
+}
+
+# combined = wrap_plots(plotlist = plot_list, ncol = 3)
+# 
+# # Save one combined figure
+# ggsave(
+#   filename = "synth2-kgr-outsample-combined.png",
+#   plot = combined,
+#   path = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/Paper1-images/plos1-figs",
+#   width = 15,
+#   height = 13,
+#   dpi = 600
+# )
+```
+
+## Sliding window forecast
+
+Reference model 2: 
+
+```{r,warning=FALSE,echo=FALSE,cache=TRUE}
+synth_inla_data_ordered = synth_inla_data[order(synth_inla_data$time,decreasing=FALSE),]
+rownames(synth_inla_data_ordered) = NULL
+synth_starting_data = synth_inla_data_ordered[1:1000,] #252 for 36 months 
+synth_starting_data$months = as.numeric(synth_starting_data$months)
+synth_starting_data$id2 = c(1:nrow(synth_starting_data))
+rownames(synth_starting_data) = NULL
+synth_starting_data$lower = NA
+synth_starting_data$upper = NA
+synth_starting_data$y_pplower = NA
+synth_starting_data$y_ppupper = NA
+
+MAE = c()
+MAPE = c()
+RMSPE = c()
+
+while(max(synth_starting_data$time) < 300){
+  
+  ###Attach df for next month with NAs in response
+  end = nrow(synth_starting_data)
+  id = c(1:5)
+  id2 = (synth_starting_data$id2[end]+1):(synth_starting_data$id2[end]+5)
+  response = rep(NA,5)
+  lower = rep(NA,5)
+  upper = rep(NA,5)
+  y_pplower = rep(NA,5)
+  y_ppupper = rep(NA,5)
+  time = rep(synth_starting_data$time[end]+1,each=5)
+  Intercept1 = c(1,NA,NA,NA,NA)
+  Intercept2 = c(NA,1,NA,NA,NA)
+  Intercept3 = c(NA,NA,1,NA,NA)
+  Intercept4 = c(NA,NA,NA,1,NA)
+  Intercept5 = c(NA,NA,NA,NA,1)
+  
+  if (synth_starting_data$months[end] == 12){
+    months = rep(1,5)
+  } else{
+    value = synth_starting_data$months[end]
+    months = rep((value+1),5)
+  }
+  
+  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2,Intercept3,
+                      Intercept4,Intercept5,lower,upper,y_pplower,y_ppupper)
+  synth_starting_data = rbind(synth_starting_data,new_data)
+  synth_starting_data$months = factor(synth_starting_data$months)
+  
+  ###Fit reference model
+
+  #Can set a fixed initial value for hyperprior if you want to fix hyperparameters
+  # prec_prior <- list(prec = list(prior = "loggamma", param = c(0.01,0.01), inital = 2.771018, fixed=TRUE))
+  
+  ref_formula2 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
+    Intercept5 + f(id, model = "bym", graph = synth_adj) 
+    
+  ref_model2 = inla(ref_formula2,family = "poisson",data = synth_starting_data,
+                  control.compute = list(dic=TRUE,waic=TRUE),
+                  control.predictor = list(compute = TRUE, link = 1))
+  
+  ###Append ref model 2 predictions to starting data
+  preds_ref_model2 = ref_model2$summary.fitted.values
+  preds_ref_model2$mean = round(preds_ref_model2$mean)
+  preds_ref_model2 = poisson_pp_sampling(preds_ref_model2,n=100)
+  end2 = nrow(preds_ref_model2)
+  
+  pred_mean = preds_ref_model2$mean[(end2-4):end2]
+  pred_lower = preds_ref_model2$`0.025quant`[(end2-4):end2]
+  pred_upper = preds_ref_model2$`0.975quant`[(end2-4):end2]
+
+  synth_starting_data$response[(end+1):(end+5)] = pred_mean
+  synth_starting_data$lower[(end+1):(end+5)] = pred_lower
+  synth_starting_data$upper[(end+1):(end+5)] = pred_upper
+
+  pred_lower2 = preds_ref_model2$y_pplower[(end2-4):end2]
+  pred_upper2 = preds_ref_model2$y_ppupper[(end2-4):end2]
+  
+  synth_starting_data$y_pplower[(end+1):(end+5)] = pred_lower2
+  synth_starting_data$y_ppupper[(end+1):(end+5)] = pred_upper2
+    
+  # synth_starting_data$response = replace(synth_starting_data$response,which(synth_starting_data$response < 0),0)
+  synth_starting_data$months = as.numeric(synth_starting_data$months)
+  
+  # ###Calculate performance metrics at each step (avg over all clusters)
+  # est_lambda = rep(1,5)
+  # 
+  # for (c in 1:num_clus){
+  # actual = inla_full_data %>% filter(id == c)  %>% data.frame()
+  # m = unique(months)
+  # 
+  # actual_m = actual %>% filter(months == m) %>% select(response)
+  # est_lambda[c] = mean(actual_m$response)
+  # }
+  # 
+  # MAE = c(MAE,mean(abs(est_lambda - pred_data)))
+  # MAPE = c(MAPE,mean(abs((est_lambda - pred_data)/est_lambda)))
+  # RMSPE = c(RMSPE,sqrt(mean((est_lambda - pred_data)^2)))
+}
+
+
+###Have to calculate MASE for each time point separately
+# MASE = c()
+# m = 12
+# 
+# est_lambdas_df = rep(1,5)
+# pred_test_df = rep(1,5)
+# 
+# for (j in 200:300){
+#   for (c in 1:num_clus){
+#     actual = synth_starting_data %>% filter(id == c)  %>% data.frame()
+#     actual_m = actual %>% filter(months == m,time < j) %>% select(response)
+#     est_lambda[c] = mean(actual_m$response)
+#   }
+#   
+#   pred_test = synth_starting_data %>% filter(time == j) %>% select(response) %>% as.matrix() %>% c()
+#   
+#   pred_test_df = rbind(pred_test_df,pred_test)
+#   est_lambdas_df = rbind(est_lambdas_df,est_lambda)
+#   
+#     if (m == 12){
+#   m = 1
+#   } else{
+#   m = value+1
+#   }
+# }
+# 
+# est_lambdas_df = est_lambdas_df[-1,]
+# pred_test_df = pred_test_df[-1,]
+# 
+# for (j in 2:nrow(pred_test_df)){
+#   error = (abs(est_lambdas_df[j,] - pred_test_df[j,])) / (abs(est_lambdas_df[j,] - est_lambdas_df[(j-1),])) / (nrow(est_lambdas_df)-1)
+#   MASE = c(MASE,mean(error))
+# }
 ```
 
 ```{r}
-kgr_formula1.2 = response ~ -1 + Intercept1 + Intercept2 + Intercept3 + Intercept4 + 
-  Intercept5 + f(id2,model = "generic0",Cmatrix = inv_covGP2)
+plot_list = list()
 
-inla_model2 = inla(formula = kgr_formula1.2,family = "poisson",data = synth_inla_outsample_data,
-                control.compute = list(dic=TRUE,waic=TRUE,
-                                       return.marginals.predictor=TRUE),
-                control.inla = list(strategy = "laplace"),
-                control.predictor = list(compute = TRUE, link = 1))
-
-inla_model2$summary.fixed
-```
-
-
-```{r}
 for (i in 1:5){
   df = synth_inla_data %>% filter(id == i) %>% select(response,time)
-  preds = inla_model2$summary.fitted.values %>% filter(id == i) 
+  preds = synth_starting_data %>% filter(id == i) 
   df = cbind(df,preds)
+  df = df[,-6]
+  colnames(df)[5] = "mean"
   df$mean = round(df$mean)
   
-  title = sprintf("Posterior Predictive Fits for Cluster %s",i)
+  title = sprintf("Cluster %s",i)
   
-  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + geom_vline(xintercept = 240,linetype = "dashed",color = "blue",linewidth = 1.5)
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) + geom_vline(xintercept = 200,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + xlab("Month") + ylab("Intensity") + theme_classic(base_size = 14)
   print(post_pred_plot)
-  }
+  
+  plot_list[[i]] = post_pred_plot
+}
+
+combined = wrap_plots(plotlist = plot_list, ncol = 3)
+
+# Save one combined figure
+ggsave(
+  filename = "synth2-ref-slidingforecast-combined.png",
+  plot = combined,
+  path = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/Paper1-images/plos1-figs",
+  width = 11,
+  height = 9,
+  dpi = 600
+)
 ```
+
+KGR-SKATER model: 
+
+```{r,warning=FALSE,echo=FALSE,cache=TRUE}
+rownames(synth_inla_data_ordered) = NULL
+synth_starting_data2 = synth_inla_data_ordered[1:1000,] #1000 for 200 months 
+synth_starting_data2$months = as.numeric(synth_starting_data2$months)
+synth_starting_data2$id2 = c(1:nrow(synth_starting_data2))
+rownames(synth_starting_data2) = NULL
+synth_starting_data2$lower = NA
+synth_starting_data2$upper = NA
+synth_starting_data2$y_pplower = NA
+synth_starting_data2$y_ppupper = NA
+
+MAE = c()
+MAPE = c()
+RMSPE = c()
+
+while(max(synth_starting_data2$time) < 300){
+  
+  ###Attach df for next month with NAs in response
+  end = nrow(synth_starting_data2)
+  id = c(1:5)
+  id2 = (synth_starting_data2$id2[end]+1):(synth_starting_data2$id2[end]+5)
+  response = rep(NA,5)
+  lower = rep(NA,5)
+  upper = rep(NA,5)
+  y_pplower = rep(NA,5)
+  y_ppupper = rep(NA,5)
+  time = rep(synth_starting_data2$time[end]+1,each=5)
+  Intercept1 = c(1,NA,NA,NA,NA)
+  Intercept2 = c(NA,1,NA,NA,NA)
+  Intercept3 = c(NA,NA,1,NA,NA)
+  Intercept4 = c(NA,NA,NA,1,NA)
+  Intercept5 = c(NA,NA,NA,NA,1)
+  
+  if (synth_starting_data2$months[end] == 12){
+    months = rep(1,5)
+  } else{
+    value = synth_starting_data2$months[end]
+    months = rep((value+1),5)
+  }
+  
+  new_data = data.frame(id,id2,response,time,months,Intercept1,Intercept2,Intercept3,
+                      Intercept4,Intercept5,lower,upper,y_pplower,y_ppupper)
+  synth_starting_data2 = rbind(synth_starting_data2,new_data)
+  synth_starting_data2$months = factor(synth_starting_data2$months)
+  
+  #Proposed model 1
+  kgr_formula1 = response ~ -1 + months + Intercept1 + Intercept2 + Intercept3 + Intercept4 +
+   Intercept5 + f(id2,model = "generic0",Cmatrix = inv_covGP2[c(synth_starting_data2$id2),c(synth_starting_data2$id2)])
+
+  kgr_model1 = inla(kgr_formula1, data = synth_starting_data2, family = "poisson",
+                    control.predictor = list(compute = TRUE, link = 1))
+
+  preds_kgr_model = kgr_model1$summary.fitted.values
+  
+  ###Append KGR model predictions to starting data
+  preds_kgr_model$mean = round(preds_kgr_model$mean)
+  preds_kgr_model = poisson_pp_sampling(preds_kgr_model)
+  end2 = nrow(preds_kgr_model)
+  
+  pred_mean = preds_kgr_model$mean[(end2-4):end2]
+  pred_lower = preds_kgr_model$`0.025quant`[(end2-4):end2]
+  pred_upper = preds_kgr_model$`0.975quant`[(end2-4):end2]
+
+  synth_starting_data2$response[(end+1):(end+5)] = pred_mean
+  synth_starting_data2$lower[(end+1):(end+5)] = pred_lower
+  synth_starting_data2$upper[(end+1):(end+5)] = pred_upper
+
+  pred_lower2 = preds_kgr_model$y_pplower[(end2-4):end2]
+  pred_upper2 = preds_kgr_model$y_ppupper[(end2-4):end2]
+  
+  synth_starting_data2$y_pplower[(end+1):(end+5)] = pred_lower2
+  synth_starting_data2$y_ppupper[(end+1):(end+5)] = pred_upper2
+    
+  synth_starting_data2$months = as.numeric(synth_starting_data2$months)
+  
+  # ###Calculate performance metrics at each step (avg over all clusters)
+  # est_lambda = rep(1,5)
+  # 
+  # for (c in 1:num_clus){
+  # actual = inla_full_data %>% filter(id == c)  %>% data.frame()
+  # m = unique(months)
+  # 
+  # actual_m = actual %>% filter(months == m) %>% select(response)
+  # est_lambda[c] = mean(actual_m$response)
+  # }
+  # 
+  # MAE = c(MAE,mean(abs(est_lambda - pred_data)))
+  # MAPE = c(MAPE,mean(abs((est_lambda - pred_data)/est_lambda)))
+  # RMSPE = c(RMSPE,sqrt(mean((est_lambda - pred_data)^2)))
+}
+
+
+###Have to calculate MASE for each time point separately
+# MASE = c()
+# m = 12
+# 
+# est_lambdas_df = rep(1,5)
+# pred_test_df = rep(1,5)
+# 
+# for (j in 200:300){
+#   for (c in 1:num_clus){
+#     actual = synth_starting_data2 %>% filter(id == c)  %>% data.frame()
+#     actual_m = actual %>% filter(months == m,time < j) %>% select(response)
+#     est_lambda[c] = mean(actual_m$response)
+#   }
+#   
+#   pred_test = synth_starting_data2 %>% filter(time == j) %>% select(response) %>% as.matrix() %>% c()
+#   
+#   pred_test_df = rbind(pred_test_df,pred_test)
+#   est_lambdas_df = rbind(est_lambdas_df,est_lambda)
+#   
+#     if (m == 12){
+#   m = 1
+#   } else{
+#   m = value+1
+#   }
+# }
+# 
+# est_lambdas_df = est_lambdas_df[-1,]
+# pred_test_df = pred_test_df[-1,]
+# 
+# for (j in 2:nrow(pred_test_df)){
+#   error = (abs(est_lambdas_df[j,] - pred_test_df[j,])) / (abs(est_lambdas_df[j,] - est_lambdas_df[(j-1),])) / (nrow(est_lambdas_df)-1)
+#   MASE = c(MASE,mean(error))
+# }
+```
+
+```{r}
+plot_list = list()
+
+for (i in 1:5){
+  df = synth_inla_data %>% filter(id == i) %>% select(response,time)
+  preds = synth_starting_data2 %>% filter(id == i) 
+  df = cbind(df,preds)
+  df = df[,-6]
+  colnames(df)[5] = "mean"
+  df$mean = round(df$mean)
+  
+  title = sprintf("Cluster %s",i)
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=response)) + geom_point() + geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) + geom_vline(xintercept = 200,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + xlab("Month") + ylab("Intensity") + theme_classic(base_size = 14)
+  
+  print(post_pred_plot)
+  plot_list[[i]] = post_pred_plot
+}
+
+combined = wrap_plots(plotlist = plot_list, ncol = 3)
+
+# Save one combined figure
+ggsave(
+  filename = "synth2-kgr-slidingforecast-combined.png",
+  plot = combined,
+  path = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 1 Code/Paper1-images/plos1-figs",
+  width = 11,
+  height = 9,
+  dpi = 600
+)
+```
+
+
+
