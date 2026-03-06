@@ -1,7 +1,9 @@
 # KGR-SKATER
-Code for implementing spatially clustered kernel graph regression with INLA for high dimensional data (which we hope to extend to spatiotemporal causal inference)
+This repository contains the code and data used in the paper:
 
-Authors: Jeffrey Wu, Gareth W Peters, Alex Franks (UCSB)
+“KGR-SKATER: Spatially clustered kernel graph regression for counting processes.”
+
+Authors: Jeffrey Wu, Alex Franks, Gareth W Peters (UCSB)
 
 In this project, we develop a novel spatiotemporal modeling framework that incorporates complex dependence structures into a model separately in a parsimonious and interpretable fashion. Then, we demonstrate this framework's utility with an application and simulation study. The overarching research question for this project is: can we model respiratory related deaths in California using spatial variation in social deprivation score and temporal variation in air pollutant levels? We hope to extend this to a causal question in our next project.
 
